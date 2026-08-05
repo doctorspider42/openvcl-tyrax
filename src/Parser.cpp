@@ -14,6 +14,7 @@
 #include "VsmCostAnalyzer.h"
 #include "VuInstructionInfo.h"
 #include "VuSchedulerAnalysis.h"
+#include "VuSchedulingRules.h"
 
 #include <iostream>
 #include <fstream>
@@ -2044,6 +2045,19 @@ bool Parser::tokenize()
 {
 	m_tokenizer.setNewSyntax( m_cmdLine.newSyntax() );
 	m_tokenizer.setOperands( m_operands );
+
+	// Scheduling policy, consulted by the free functions in VuSchedulingRules that
+	// every scheduler entry point calls. Set here rather than next to the register
+	// allocator because --dump-schedule-info leaves the state machine before
+	// allocation runs, and a diagnostic that does not describe the code we would
+	// emit is worse than no diagnostic.
+	setVuScheduleFlagReadersEnabled( m_cmdLine.scheduleFlagReaders() );
+	setVuFmacInterlockEnabled( m_cmdLine.fmacInterlock() );
+	setVuFlagVisibilityLatency( m_cmdLine.sceLatencies() ? 1u : 4u );
+	setVuIntegerLoadReadyCycles( m_cmdLine.sceLatencies() ? 3u : 0u );
+	setVuEmitDelayFillersEnabled( m_cmdLine.emitDelayFillers() );
+	setVuBranchInterlockEnabled( m_cmdLine.branchInterlock() );
+	setVuBranchBubbleOnDependencyEnabled( m_cmdLine.branchBubbleOnDependency() );
 
 	for( std::list<Line>::const_iterator i = m_lines.begin(); i != m_lines.end(); i++ )
 	{

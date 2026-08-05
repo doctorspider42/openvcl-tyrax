@@ -52,6 +52,44 @@ int VuLatencyTracker::readHazardDelay( const Token& token,
                                        const Token* partner,
                                        int currentCycle ) const
 {
+	return readHazardDelayImpl( token, partner, currentCycle, false );
+}
+
+int VuLatencyTracker::manualReadHazardDelay( const Token& token,
+                                             const Token* partner,
+                                             int currentCycle ) const
+{
+	return readHazardDelayImpl( token, partner, currentCycle, true );
+}
+
+namespace
+{
+	// Register keys are the allocated register names, "VF00".."VF31" /
+	// "VI00".."VI15" (see vuRegisterKey).
+	// Producers whose result a BRANCH may read without a padding word: the
+	// hardware stalls for these on its own. Integer loads and the flag readers
+	// (which write an integer register) qualify; an ordinary integer op does not
+	// - see the file comment for the SCE output this is calibrated against.
+	bool isBranchInterlockedProducer( const std::string& mnemonic )
+	{
+		return mnemonic.compare( 0, 3, "ilw" ) == 0
+		    || mnemonic.compare( 0, 2, "lq" ) == 0
+		    || isVuClipReader( mnemonic )
+		    || isVuMacReader( mnemonic );
+	}
+	bool isFloatRegisterKey( const std::string& key )
+	{
+		return key.length() >= 2
+		    && (key[0] == 'V' || key[0] == 'v')
+		    && (key[1] == 'F' || key[1] == 'f');
+	}
+}
+
+int VuLatencyTracker::readHazardDelayImpl( const Token& token,
+                                           const Token* partner,
+                                           int currentCycle,
+                                           bool skipInterlockedRegisters ) const
+{
 	std::list<std::string> reads;
 	collectVuRegisterReadKeys( token, reads );
 	if( partner )
@@ -68,6 +106,23 @@ int VuLatencyTracker::readHazardDelay( const Token& token,
 	int needed = 0;
 	for( std::list<std::string>::const_iterator i = reads.begin(); i != reads.end(); ++i )
 	{
+		// The FMAC pipeline interlocks on VF registers: the hardware stalls by
+		// itself, so this wait must not be paid for in instruction words.
+		if( skipInterlockedRegisters && isFloatRegisterKey( *i ) )
+			continue;
+		// Same distinction for the integer file, but it depends on the CONSUMER:
+		// a branch reading a load result or a flag-reader result stalls in
+		// hardware, so those words are not ours to spend either.
+		if( skipInterlockedRegisters && vuBranchInterlockEnabled()
+			&& vuTokenHasInstructionFlag( token, VU_INSTR_BRANCH ) )
+		{
+			std::map<std::string, std::string>::const_iterator branchProducer =
+			    m_registerProducerMnemonic.find( *i );
+			if( branchProducer != m_registerProducerMnemonic.end()
+			    && isBranchInterlockedProducer( branchProducer->second ) )
+				continue;
+		}
+
 		std::map<std::string, int>::const_iterator ready = m_registerReadyCycle.find( *i );
 		if( ready == m_registerReadyCycle.end() )
 			continue;
@@ -120,18 +175,23 @@ int VuLatencyTracker::readHazardDelay( const Token& token,
 		readsClip = readsClip || tokenReadsImplicitResource( *partner, VU_RESOURCE_CLIP );
 	}
 
+	// How long after its producer a flag may be read. 4 by default;
+	// --sce-flag-latency calibrates it to the 1 that SCE's vcl emits (see
+	// vuFlagVisibilityLatency).
+	const int flagLatency = static_cast<int>( vuFlagVisibilityLatency() );
+
 	int flagDelay = 0;
 	if( readsMac )
 	{
 		const int gap = flagCycle - m_lastFMACCycle;
-		if( 4 - gap > flagDelay )
-			flagDelay = 4 - gap;
+		if( flagLatency - gap > flagDelay )
+			flagDelay = flagLatency - gap;
 	}
 	if( readsClip )
 	{
 		const int gap = flagCycle - m_lastClipwCycle;
-		if( 4 - gap > flagDelay )
-			flagDelay = 4 - gap;
+		if( flagLatency - gap > flagDelay )
+			flagDelay = flagLatency - gap;
 	}
 	if( flagDelay > 0 )
 		needed += flagDelay;
@@ -149,7 +209,27 @@ void VuLatencyTracker::recordWrites( const Token& token, int issueCycle, bool fo
 	if( !token.operand() || token.operand()->latency() <= 1 )
 		return;
 
-	const int readyCycle = issueCycle + static_cast<int>( token.operand()->latency() ) + 1;
+	int readyCycle = issueCycle + static_cast<int>( token.operand()->latency() ) + 1;
+
+	// An integer load lands sooner than latency+1 says. The table gives ILW a
+	// latency of 4, so this formula makes its result readable at issue+5, while
+	// SCE's vcl reads one at issue+3 - measured as the minimum ilw -> integer-op
+	// distance over the 25 microprograms of a real engine (85 samples), against
+	// openvcl's own minimum of 5 on the same corpus. Those two extra cycles are
+	// paid in nop words at every load-use pair. --sce-latencies calibrates it.
+	if( vuIntegerLoadReadyCycles() > 0 )
+	{
+		VuTokenResourceAccess access;
+		if( buildVuTokenResourceAccess( token, access )
+		    && access.memoryKind == VU_MEMORY_LOAD
+		    && access.memoryFlags == VU_MEMORY_FLAG_NONE )
+		{
+			const int calibrated = issueCycle + static_cast<int>( vuIntegerLoadReadyCycles() );
+			if( calibrated < readyCycle )
+				readyCycle = calibrated;
+		}
+	}
+
 	std::list<std::string> writes;
 	collectVuRegisterWriteKeys( token, writes );
 	for( std::list<std::string>::const_iterator i = writes.begin(); i != writes.end(); ++i )

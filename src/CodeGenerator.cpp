@@ -947,6 +947,7 @@ CodeGenerator::CodeGenerator()
 	m_knownLoopOptimizations = false;
 	m_genericSoftwarePipelining = false;
 	m_strictScheduleSlots = false;
+	m_skipBranchPreBubble = false;
 	m_enableUpperMoves = false;
 	m_ignoredImplicitWawResources = VU_RESOURCE_NONE;
 }
@@ -1475,6 +1476,21 @@ bool CodeGenerator::beginProcess(const std::list<Token>& tokens)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+bool CodeGenerator::retractLastEmittedRow()
+{
+	if( m_codeLines.empty() )
+		return false;
+
+	// Only a plain instruction row may be taken back: a label, a directive or a
+	// source comment (emitSource) is not ours to move.
+	const std::string& last = m_codeLines.back();
+	if( last.empty() || last[0] != ' ' )
+		return false;
+
+	m_codeLines.pop_back();
+	return true;
+}
+
 void CodeGenerator::addNopLine()
 {
 	m_codeLines.push_back( formatRawPairedInstructionLine( vuInstr(VU_OP_NOP), vuInstr(VU_OP_NOP) ) );
@@ -1536,10 +1552,84 @@ bool CodeGenerator::branchNeedsPreBubble( const Token& token ) const
 	return !(access.instructionFlags & VU_INSTR_UNCONDITIONAL_BRANCH);
 }
 
+// Would --emit-delay-fillers move this slot's instruction into `branch`'s delay
+// slot? Same conditions the emitter applies later, so the bubble decision above and
+// the move below cannot disagree.
+bool CodeGenerator::slotCanBecomeBranchDelayFiller( const VuScheduledIssueSlot& slot,
+                                                    const Token& branch ) const
+{
+	if( !vuEmitDelayFillersEnabled() || slot.padding )
+		return false;
+	if( !slot.firstToken || slot.secondToken || slot.firstToken == &branch )
+		return false;
+	return canMoveIntoBranchDelaySlot( *slot.firstToken, branch );
+}
+
+// Does either of the two slots above `index` write a register `branch` reads?
+// i-1 is the row that creates the hazard; i-2 is checked as well because
+// --emit-delay-fillers can move the i-1 row into the delay slot, which puts i-2
+// directly above the branch. Padding slots produce nothing, so they answer no.
+bool CodeGenerator::scheduledSlotsFeedBranch(
+    const std::vector<const VuScheduledIssueSlot*>& slots,
+    unsigned int index,
+    const Token& branch ) const
+{
+	std::list<std::string> reads;
+	collectVuRegisterReadKeys( branch, reads );
+	if( reads.empty() )
+		return false;
+
+	for( unsigned int back = 1; back <= 2 && back <= index; ++back )
+	{
+		const VuScheduledIssueSlot& slot = *slots[index - back];
+		if( slot.padding )
+			continue;
+		// The row two up only becomes adjacent if the one above it is about to be
+		// retracted into the delay slot; otherwise it is already far enough away.
+		if( back == 2 && !slotCanBecomeBranchDelayFiller( *slots[index - 1], branch ) )
+			continue;
+		const Token* tokens[2] = { slot.firstToken, slot.secondToken };
+		for( int t = 0; t < 2; ++t )
+		{
+			if( !tokens[t] || tokens[t] == &branch )
+				continue;
+			// Interlocked producers do not need the word - see --branch-interlock.
+			if( vuBranchInterlockEnabled()
+			    && ( isVuPlainMemoryLoad( *tokens[t] )
+			         || isVuClipReader( lowerVuTokenName( *tokens[t] ) )
+			         || isVuMacReader( lowerVuTokenName( *tokens[t] ) ) ) )
+				continue;
+			std::list<std::string> writes;
+			collectVuRegisterWriteKeys( *tokens[t], writes );
+			for( std::list<std::string>::const_iterator w = writes.begin(); w != writes.end(); ++w )
+			{
+				for( std::list<std::string>::const_iterator r = reads.begin(); r != reads.end(); ++r )
+				{
+					if( *w == *r )
+						return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 void CodeGenerator::padForBranchPreBubble( const Token& token )
 {
 	if( !branchNeedsPreBubble( token ) )
 		return;
+
+	// branchNeedsPreBubble() answers "is this the kind of branch that can need a
+	// bubble", never "does THIS one". The strict emitter decides that per branch
+	// from the slots above it and parks the answer here - see
+	// --branch-bubble-on-dependency. Do NOT ask the latency tracker: recordWrites()
+	// ignores anything with latency <= 1, so it has never heard of this hazard and
+	// would happily drop every bubble.
+	if( m_skipBranchPreBubble )
+	{
+		m_skipBranchPreBubble = false;
+		return;
+	}
 
 	if( m_codeLines.empty()
 	    || m_codeLines.back() != formatRawPairedInstructionLine( vuInstr(VU_OP_NOP), vuInstr(VU_OP_NOP) ) )
@@ -2039,12 +2129,16 @@ void CodeGenerator::emitStrictScheduledPadding( const VuScheduledIssueSlot& slot
 
 		case VU_SCHEDULED_PADDING_NOP:
 		{
-			const unsigned int count = slot.cycleCount > 0 ? slot.cycleCount : 1;
-			for( unsigned int i = 0; i < count; ++i )
-			{
+			// emitCycleCount, not cycleCount: a wait on the interlocked FMAC
+			// pipeline costs cycles on the hardware either way, and writing nops
+			// for it only burns micro memory. See VuLatencyTracker's
+			// manualReadHazardDelay. m_currentCycle still advances by the full
+			// count so the cycle model stays truthful.
+			const unsigned int cycles = slot.cycleCount > 0 ? slot.cycleCount : 1;
+			const unsigned int words = slot.emitCycleCount < cycles ? slot.emitCycleCount : cycles;
+			for( unsigned int i = 0; i < words; ++i )
 				addNopLine();
-				m_currentCycle++;
-			}
+			m_currentCycle += cycles;
 			break;
 		}
 
@@ -2230,12 +2324,53 @@ bool CodeGenerator::emitStrictScheduledProgram( const std::list<Token>& tokens, 
 			continue;
 		}
 		const Token* branch = branchTokenInScheduledSlot(slot);
+		m_skipBranchPreBubble = branch != NULL
+		                        && vuBranchBubbleOnDependencyEnabled()
+		                        && !scheduledSlotsFeedBranch( slots, i, *branch );
 		const Token* delayFiller = NULL;
 		unsigned int delayFillerSlot = i + 1;
 		while( branch && delayFillerSlot < slots.size() && slots[delayFillerSlot]->padding )
 			++delayFillerSlot;
 		if( branch && delayFillerSlot < slots.size() )
 			delayFiller = branchDelayFillerInScheduledSlot(*slots[delayFillerSlot]);
+
+		// --emit-delay-fillers: a branch's delay slot is a word whether or not
+		// anything useful is in it. fillBranchDelaySlots() runs before scheduling
+		// and only ever considers the instruction that precedes the branch IN
+		// SOURCE ORDER, so after scheduling most slots are still empty (measured
+		// on stapip_clip_c: 13 of 20 empty, against 9 of 20 for SCE's vcl, whose
+		// filled slots hold sq/isw as often as integer ops).
+		//
+		// Here the schedule is known, so the instruction actually scheduled just
+		// BEFORE the branch can be offered instead. It executes once either way -
+		// the delay slot runs before the branch takes effect - and
+		// canMoveIntoBranchDelaySlot() is the same legality test the pre-pass
+		// uses: no label, no second branch, and the branch must not read what the
+		// candidate writes (it used to read the new value; after the move it would
+		// see the old one).
+		if( !delayFiller && branch && vuEmitDelayFillersEnabled() && i > 0 )
+		{
+			const VuScheduledIssueSlot& prev = *slots[i - 1];
+			const Token* candidate = prev.padding ? NULL : prev.firstToken;
+			if( candidate
+			    && !prev.secondToken
+			    && candidate != branch
+			    && m_emittedDelayFiller != candidate
+			    && canMoveIntoBranchDelaySlot(*candidate, *branch)
+			    && prepareStrictScheduledToken(*candidate, exitWritten, true) )
+			{
+				// The previous slot has already been emitted as its own row, so
+				// take that row back and re-emit the pair as branch + filler.
+				if( retractLastEmittedRow() )
+				{
+					m_emittedDelayFiller = candidate;
+					emitBranchWithDelayFiller(*branch, *candidate);
+					if( isVuTerminalUnconditionalBranch(*branch) )
+						exitWritten = true;
+					continue;
+				}
+			}
+		}
 
 		if( delayFiller && prepareStrictScheduledToken(*delayFiller, exitWritten, true) )
 		{
@@ -2397,8 +2532,46 @@ void CodeGenerator::fillBranchDelaySlots( std::list<Token>& tokens ) const
 			continue;
 		std::list<Token>::iterator candidate = branch;
 		--candidate;
+
+		// --emit-delay-fillers: if the instruction right before the branch cannot
+		// go in the slot, keep walking back. A candidate further up is just as
+		// good as long as it can cross everything between itself and the branch,
+		// which vuTokenCanMoveBefore answers with the same rules the scheduler
+		// uses. Without this the search gives up after one try and the slot stays
+		// a nop word - measured on stapip_clip_c, 13 of 20 slots empty against
+		// SCE vcl's 9.
 		if( !canMoveIntoBranchDelaySlot(*candidate, *branch) )
-			continue;
+		{
+			if( !vuEmitDelayFillersEnabled() )
+				continue;
+
+			bool found = false;
+			std::list<Token>::iterator probe = candidate;
+			for( unsigned int steps = 0; steps < 16 && probe != tokens.begin(); ++steps )
+			{
+				--probe;
+				if( !canMoveIntoBranchDelaySlot(*probe, *branch) )
+					continue;
+
+				bool crossable = true;
+				for( std::list<Token>::iterator crossed = probe; crossable; )
+				{
+					++crossed;
+					if( crossed == branch )
+						break;
+					if( !vuTokenCanMoveBefore( *crossed, *probe ) )
+						crossable = false;
+				}
+				if( !crossable )
+					continue;
+
+				candidate = probe;
+				found = true;
+				break;
+			}
+			if( !found )
+				continue;
+		}
 
 		Token filler = *candidate;
 		filler.setFlags(filler.flags() | Token::BRANCH_DELAY_FILLER);
@@ -2667,7 +2840,17 @@ bool CodeGenerator::canMoveIntoBranchDelaySlot( const Token& candidate, const To
 		return false;
 	if( vuTokenBranchDelaySlots(candidate) > 0 )
 		return false;
-	if( !candidate.operand() || candidate.operand()->unit() != Operand::IALU )
+	// Integer ALU, or - with --emit-delay-fillers - a plain STORE as well. SCE's
+	// vcl puts stores in delay slots freely: of its 94 filled slots across the 25
+	// microprograms of a real engine, 34 hold an `sq` or `isw` against 37 integer
+	// ALU ops. A store is the safe half of that - it writes no register, so moving
+	// it one word later cannot make a consumer read too early, and crossing only
+	// the branch reorders it against no other memory access.
+	const bool candidateIsIalu =
+	    candidate.operand() && candidate.operand()->unit() == Operand::IALU;
+	if( !candidate.operand() )
+		return false;
+	if( !candidateIsIalu && !vuEmitDelayFillersEnabled() )
 		return false;
 	if( candidate.operand()->latency() > 1 )
 		return false;
@@ -2678,8 +2861,15 @@ bool CodeGenerator::canMoveIntoBranchDelaySlot( const Token& candidate, const To
 	    || !buildVuTokenResourceAccess(branch, branchAccess) )
 		return false;
 
-	if( candidateAccess.memoryKind != VU_MEMORY_NONE
-	    || candidateAccess.memoryFlags != VU_MEMORY_FLAG_NONE )
+	const bool candidateIsPlainStore =
+	    vuEmitDelayFillersEnabled()
+	    && candidateAccess.memoryKind == VU_MEMORY_STORE
+	    && candidateAccess.memoryFlags == VU_MEMORY_FLAG_NONE;
+	if( !candidateIsIalu && !candidateIsPlainStore )
+		return false;
+	if( candidateAccess.memoryKind != VU_MEMORY_NONE && !candidateIsPlainStore )
+		return false;
+	if( candidateAccess.memoryFlags != VU_MEMORY_FLAG_NONE )
 		return false;
 	if( candidateAccess.branchDelaySlots > 0 )
 		return false;

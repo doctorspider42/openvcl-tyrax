@@ -56,6 +56,12 @@ public:
 	bool dumpScheduleInfo() const;
 	bool dumpScheduleInfoJson() const;
 	bool knownLoopOptimizations() const;
+	bool scheduleFlagReaders() const;
+	bool fmacInterlock() const;
+	bool sceLatencies() const;
+	bool emitDelayFillers() const;
+	bool branchInterlock() const;
+	bool branchBubbleOnDependency() const;
 	bool genericSoftwarePipelining() const;
 	bool strictScheduleSlots() const;
 	const std::vector< std::pair<std::string, unsigned int> >& costLoops() const;
@@ -130,6 +136,12 @@ private:
 		DUMP_SCHEDULE_INFO,
 		DUMP_SCHEDULE_INFO_JSON,
 		ENABLE_KNOWN_LOOP_OPTIMIZATIONS,
+		SCHEDULE_FLAG_READERS,
+		FMAC_INTERLOCK,
+		SCE_LATENCIES,
+		EMIT_DELAY_FILLERS,
+		BRANCH_INTERLOCK,
+		BRANCH_BUBBLE_ON_DEPENDENCY,
 		DISABLE_KNOWN_LOOP_OPTIMIZATIONS,
 		ENABLE_GENERIC_SOFTWARE_PIPELINING,
 		DISABLE_GENERIC_SOFTWARE_PIPELINING,
@@ -185,6 +197,12 @@ private:
 	bool m_dumpScheduleInfo;
 	bool m_dumpScheduleInfoJson;
 	bool m_knownLoopOptimizations;
+	bool m_scheduleFlagReaders;
+	bool m_fmacInterlock;
+	bool m_sceLatencies;
+	bool m_emitDelayFillers;
+	bool m_branchInterlock;
+	bool m_branchBubbleOnDependency;
 	bool m_genericSoftwarePipelining;
 	bool m_strictScheduleSlots;
 	std::vector< std::pair<std::string, unsigned int> > m_costLoops;

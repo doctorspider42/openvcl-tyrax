@@ -28,6 +28,12 @@ const unsigned int VuKernelRefitNode::NO_INDEX;
 
 namespace
 {
+	// Defined further down, next to the padding it belongs with.
+	int pairingHazardDelay( const VuLatencyTracker& latencyTracker,
+	                        const Token& token,
+	                        const Token* partner,
+	                        int currentCycle );
+
 	bool containsKey( const std::list<std::string>& keys, const std::string& key )
 	{
 		for( std::list<std::string>::const_iterator i = keys.begin(); i != keys.end(); ++i )
@@ -217,7 +223,7 @@ namespace
 		const bool primaryWritesMac = tokenWritesMacForPair( *block.tokens[primary],
 		                                                     ignoredImplicitWawResources );
 		const int primaryDelay =
-		    latencyTracker.readHazardDelay( *block.tokens[primary], NULL, static_cast<int>( currentCycle ) );
+		    pairingHazardDelay( latencyTracker, *block.tokens[primary], NULL, static_cast<int>( currentCycle ) );
 
 		for( unsigned int i = 0; i < block.tokens.size(); ++i )
 		{
@@ -232,9 +238,10 @@ namespace
 			                                         tokenWritesMacForPair( *block.tokens[i],
 			                                                               ignoredImplicitWawResources ) ) )
 				continue;
-			if( latencyTracker.readHazardDelay( *block.tokens[primary],
-			                                    block.tokens[i],
-			                                    static_cast<int>( currentCycle ) ) > primaryDelay )
+			if( pairingHazardDelay( latencyTracker,
+			                        *block.tokens[primary],
+			                        block.tokens[i],
+			                        static_cast<int>( currentCycle ) ) > primaryDelay )
 				continue;
 
 			const int score = readyCandidateScore( i,
@@ -349,6 +356,22 @@ namespace
 		return 1;
 	}
 
+	// Whether a token may share an instruction word with another is decided by
+	// vuTokenPairResourcesAreIndependent - a write and a read of the same thing in
+	// ONE word is a genuine hazard no interlock can fix. The LATENCY question next
+	// to it is different: it asks whether an earlier producer is still in flight,
+	// and that is exactly what the FMAC interlock stalls for. Under
+	// --fmac-interlock, refusing to pair over it only costs instruction words.
+	int pairingHazardDelay( const VuLatencyTracker& latencyTracker,
+	                        const Token& token,
+	                        const Token* partner,
+	                        int currentCycle )
+	{
+		return vuFmacInterlockEnabled()
+		           ? latencyTracker.manualReadHazardDelay( token, partner, currentCycle )
+		           : latencyTracker.readHazardDelay( token, partner, currentCycle );
+	}
+
 	void appendReadHazardPaddingSlots( std::vector<VuScheduledIssueSlot>& slots,
 	                                   const Token& token,
 	                                   const Token* partner,
@@ -368,9 +391,28 @@ namespace
 				                                     static_cast<int>( currentCycle ) );
 			const unsigned int paddingCycleCount =
 				waitPaddingCycleCount( paddingKind, latencyTracker, currentCycle );
-			slots.push_back( makePaddingIssueSlot( paddingKind,
-			                                       currentCycle - blockStartCycle,
-			                                       paddingCycleCount ) );
+			// How much of this wait has to become instruction words: the cycles
+			// spent on the interlocked FMAC pipeline do not, the hardware stalls
+			// for them by itself. The cycle model keeps the full count, so the
+			// schedule below is unchanged - only the emitted size shrinks.
+			const int manualDelay =
+				latencyTracker.manualReadHazardDelay( token,
+				                                      partner,
+				                                      static_cast<int>( currentCycle ) );
+			unsigned int emitCycleCount = paddingCycleCount;
+			if( vuFmacInterlockEnabled() && paddingKind == VU_SCHEDULED_PADDING_NOP )
+			{
+				const unsigned int manual =
+					manualDelay > 0 ? static_cast<unsigned int>( manualDelay ) : 0u;
+				emitCycleCount = manual < paddingCycleCount ? manual : paddingCycleCount;
+			}
+			VuScheduledIssueSlot paddingSlot =
+				makePaddingIssueSlot( paddingKind,
+				                      currentCycle - blockStartCycle,
+				                      paddingCycleCount );
+			paddingSlot.emitCycleCount = emitCycleCount;
+			if( emitCycleCount > 0 )
+			slots.push_back( paddingSlot );
 			currentCycle += paddingCycleCount;
 			issueDelay = latencyTracker.readHazardDelay( token,
 			                                             partner,
@@ -904,6 +946,7 @@ namespace
 		std::vector<VuScheduledIssueSlot> slots;
 		std::vector<const Token*> segment;
 		unsigned int segmentMask = VU_RESOURCE_NONE;
+		unsigned int segmentLastIndex = block.firstTokenIndex;
 		bool haveSegment = false;
 		unsigned int currentCycle = blockStartCycle;
 
@@ -913,45 +956,32 @@ namespace
 			const Token& token = *block.tokens[offset];
 			if( isVuReadyScheduleCandidate( token ) )
 			{
-				const unsigned int tokenMask =
-					ignoredFlagWawMaskForIndex( tokenIndex,
-					                            liveness.lastMacReader,
-					                            liveness.lastClipReader );
-				if( haveSegment && tokenMask != segmentMask )
-				{
-					appendReadyScheduledSegmentSlots( segment,
-					                                 slots,
-					                                 segmentMask,
-					                                 latencyTracker,
-					                                 blockStartCycle,
-					                                 currentCycle );
-					segment.clear();
-					haveSegment = false;
-				}
-
-				if( !haveSegment )
-				{
-					segmentMask = tokenMask;
-					haveSegment = true;
-				}
-
+				// The ignorable-flag-WAW mask answers ONE question:
+				// is this flag read after the token range the dependency graph is
+				// about to be built over? Inside that range
+				// addPreciseImplicitFlagDependencies already finds every reader
+				// itself and orders the writers against it; the mask only decides
+				// whether the writers TRAILING the last reader have to keep their
+				// order (a live-out flag) or may be reordered freely.
+				//
+				// So it belongs to the end of the segment, not to each token in
+				// it. Deriving it per token forced a segment break at every change
+				// and again at the last MAC/CLIP reader - several breaks per
+				// vertex - and the scheduler can only hide a latency with work
+				// that is inside its current segment, which is where the nop
+				// padding came from. Taking the mask from the segment's LAST token
+				// keeps exactly the same answer for the trailing writers (an
+				// index equal to the last reader stays conservative) while letting
+				// one segment span everything between two real barriers.
+				segmentLastIndex = tokenIndex;
+				haveSegment = true;
 				segment.push_back( &token );
-
-				if( tokenIndex == static_cast<unsigned int>( liveness.lastMacReader )
-				    || tokenIndex == static_cast<unsigned int>( liveness.lastClipReader ) )
-				{
-					appendReadyScheduledSegmentSlots( segment,
-					                                 slots,
-					                                 segmentMask,
-					                                 latencyTracker,
-					                                 blockStartCycle,
-					                                 currentCycle );
-					segment.clear();
-					haveSegment = false;
-				}
 				continue;
 			}
 
+			segmentMask = ignoredFlagWawMaskForIndex( segmentLastIndex,
+			                                          liveness.lastMacReader,
+			                                          liveness.lastClipReader );
 			appendReadyScheduledSegmentSlots( segment,
 			                                 slots,
 			                                 segmentMask,
@@ -964,7 +994,7 @@ namespace
 			if( !slots.empty() )
 			{
 				const unsigned int pairedCycle = blockStartCycle + slots.back().issueCycle;
-				if( latencyTracker.readHazardDelay( token, NULL, static_cast<int>( pairedCycle ) ) <= 0 )
+				if( pairingHazardDelay( latencyTracker, token, NULL, static_cast<int>( pairedCycle ) ) <= 0 )
 					pairedWithPreviousSlot =
 						tryPairTailWithPreviousSlot( slots,
 						                             token,
@@ -993,6 +1023,9 @@ namespace
 			}
 		}
 
+		segmentMask = ignoredFlagWawMaskForIndex( segmentLastIndex,
+		                                          liveness.lastMacReader,
+		                                          liveness.lastClipReader );
 		appendReadyScheduledSegmentSlots( segment,
 		                                 slots,
 		                                 segmentMask,
@@ -5682,6 +5715,7 @@ VuScheduledIssueSlot::VuScheduledIssueSlot()
 	ignoredImplicitWawResources = VU_RESOURCE_NONE;
 	issueCycle = 0;
 	cycleCount = 1;
+	emitCycleCount = 1;
 }
 
 VuScheduledBasicBlock::VuScheduledBasicBlock()

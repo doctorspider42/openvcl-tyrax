@@ -547,10 +547,107 @@ bool isVuReadyScheduleCandidate( const Token& token )
 	    && access.memoryKind != VU_MEMORY_LOAD
 	    && access.memoryKind != VU_MEMORY_STORE )
 		return false;
-	if( access.implicitReads & (VU_RESOURCE_MAC | VU_RESOURCE_CLIP) )
+	// Readers of the MAC/CLIP flags are excluded from scheduling by default, which
+	// breaks the scheduling segment at every one of them - in a vertex pipeline
+	// that is once per vertex, at the fcand after each clipw - and the scheduler
+	// can only hide a latency with work inside its current segment, so those
+	// breaks are where the nop padding comes from.
+	//
+	// The exclusion is not needed for correctness: buildVuDependencyGraph models
+	// ACC/MAC/CLIP as precise resources, and addPreciseImplicitFlagDependencies
+	// orders every writer of a flag against the reader it finds. The mask handed
+	// to it only has to say whether the flag is read AFTER the range, which is why
+	// the caller derives it from the segment's last token rather than per token.
+	//
+	// It stays behind --schedule-flag-readers because it does change what the
+	// known-loop-optimisation path decides: with a cheaper unpipelined estimate,
+	// that path stops software-pipelining the loops its own tests pin down. Off by
+	// default, nothing moves for anyone who does not ask.
+	if( !vuScheduleFlagReadersEnabled() && (access.implicitReads & (VU_RESOURCE_MAC | VU_RESOURCE_CLIP)) )
 		return false;
 
 	return true;
+}
+
+namespace
+{
+	bool g_scheduleFlagReaders = false;
+	bool g_fmacInterlock = false;
+	unsigned int g_flagVisibilityLatency = 4;
+	unsigned int g_integerLoadReadyCycles = 0;
+	bool g_emitDelayFillers = false;
+	bool g_branchInterlock = false;
+	bool g_branchBubbleOnDependency = false;
+}
+
+void setVuScheduleFlagReadersEnabled( bool enabled )
+{
+	g_scheduleFlagReaders = enabled;
+}
+
+bool vuScheduleFlagReadersEnabled()
+{
+	return g_scheduleFlagReaders;
+}
+
+void setVuFmacInterlockEnabled( bool enabled )
+{
+	g_fmacInterlock = enabled;
+}
+
+bool vuFmacInterlockEnabled()
+{
+	return g_fmacInterlock;
+}
+
+void setVuFlagVisibilityLatency( unsigned int cycles )
+{
+	g_flagVisibilityLatency = cycles > 0 ? cycles : 1;
+}
+
+unsigned int vuFlagVisibilityLatency()
+{
+	return g_flagVisibilityLatency;
+}
+
+void setVuIntegerLoadReadyCycles( unsigned int cycles )
+{
+	g_integerLoadReadyCycles = cycles;
+}
+
+unsigned int vuIntegerLoadReadyCycles()
+{
+	return g_integerLoadReadyCycles;
+}
+
+void setVuEmitDelayFillersEnabled( bool enabled )
+{
+	g_emitDelayFillers = enabled;
+}
+
+bool vuEmitDelayFillersEnabled()
+{
+	return g_emitDelayFillers;
+}
+
+void setVuBranchBubbleOnDependencyEnabled( bool enabled )
+{
+	g_branchBubbleOnDependency = enabled;
+}
+
+bool vuBranchBubbleOnDependencyEnabled()
+{
+	return g_branchBubbleOnDependency;
+}
+
+void setVuBranchInterlockEnabled( bool enabled )
+{
+	g_branchInterlock = enabled;
+}
+
+bool vuBranchInterlockEnabled()
+{
+	return g_branchInterlock;
 }
 
 bool isVuLowerPipe( const Token& token )

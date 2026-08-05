@@ -121,6 +121,12 @@ struct VuScheduledIssueSlot
 	unsigned int ignoredImplicitWawResources;
 	unsigned int issueCycle;
 	unsigned int cycleCount;
+
+	// For a padding slot: how many of its cycles have to be spent as emitted
+	// instruction words. Cycles waiting on the interlocked FMAC pipeline do not -
+	// the hardware stalls on its own - so emitting them only burns micro memory.
+	// Equal to cycleCount for every non-padding slot and for waitq/waitp.
+	unsigned int emitCycleCount;
 };
 
 struct VuScheduledBasicBlock

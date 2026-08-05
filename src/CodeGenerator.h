@@ -68,11 +68,20 @@ private:
 	std::string accumulatorArg( const Token::Argument& arg, const Token& token );
 
 	void addNopLine();
+
+	// Removes the most recently emitted instruction row so it can be re-emitted
+	// as a branch delay filler. False when the last line is not a plain row.
+	bool retractLastEmittedRow();
 	void emitWaitQ();
 	void emitWaitP();
 	void emitUpperWithWait( const Token& token, bool waitQ );
 	bool branchNeedsPreBubble( const Token& token ) const;
 	void padForBranchPreBubble( const Token& token );
+	bool slotCanBecomeBranchDelayFiller( const VuScheduledIssueSlot& slot,
+	                                     const Token& branch ) const;
+	bool scheduledSlotsFeedBranch( const std::vector<const VuScheduledIssueSlot*>& slots,
+	                               unsigned int index,
+	                               const Token& branch ) const;
 	void emitSingleToken( const Token& token );
 	void emitBranchWithDelayFiller( const Token& branch, const Token& filler );
 	void emitPairedTokens( const Token& a, const Token& b );
@@ -195,11 +204,15 @@ private:
 	bool m_knownLoopOptimizations;
 	bool m_genericSoftwarePipelining;
 	bool m_strictScheduleSlots;
+	// Set per branch by the strict emitter when the row above it produces none of
+	// its operands, so padForBranchPreBubble() can skip a word nobody needs.
+	bool m_skipBranchPreBubble;
 	bool m_enableUpperMoves;
 	unsigned int m_ignoredImplicitWawResources;
 	std::string m_name;
 
 	int m_currentCycle;
+	mutable const Token* m_emittedDelayFiller;
 	VuLatencyTracker m_latencyTracker;
 
 	// 9.G-1h-4a-2: out-of-band MAIN-body ranges produced by the

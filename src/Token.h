@@ -156,7 +156,8 @@ public:
 		EVALUATE,
 		ROTATE,
 		RAW,
-		RANGE     // operand template accepts a register-range (e.g. vf01-vf04)
+		RANGE,    // operand template accepts a register-range (e.g. vf01-vf04)
+		WCOMP     // operand is "the w component of this register" (CLIPw et al)
 	};
 
 	enum
