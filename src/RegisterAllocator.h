@@ -24,6 +24,7 @@
 #endif
 
 #include <map>
+#include <set>
 #include <vector>
 #include <sstream>
 
@@ -103,6 +104,8 @@ private:
 	void extendMultiQStageLiveRanges( std::list<Token>& tokens );
 	bool loopTargetHasLoopDirective( std::list<Token>::iterator target, std::list<Token>::iterator end ) const;
 	void extendLoopDirectiveRange( std::list<Token>& tokens, unsigned int loopStart, unsigned int loopEnd );
+	void tieCarriedWritesToLiveInAliases( std::list<Token>& tokens, unsigned int loopStart, unsigned int loopEnd,
+	                                      const std::set<Alias*>& liveInAliases );
 	void extendMultiQStageRange( std::list<Token>& tokens, unsigned int loopStart, unsigned int loopEnd );
 
 	bool updateDynamicTracker( const Token* src );

@@ -105,6 +105,12 @@ bool vuEmitDelayFillersEnabled();
 void setVuBranchBubbleOnDependencyEnabled( bool enabled );
 bool vuBranchBubbleOnDependencyEnabled();
 
+// --loop-liveness-always: never skip extending a live range across a loop's back
+// edge. The allocator's guard trades that correctness requirement for a compile
+// that succeeds, and the result is a value handed to two names at once.
+void setVuLoopLivenessAlwaysEnabled( bool enabled );
+bool vuLoopLivenessAlwaysEnabled();
+
 void setVuBranchInterlockEnabled( bool enabled );
 bool vuBranchInterlockEnabled();
 

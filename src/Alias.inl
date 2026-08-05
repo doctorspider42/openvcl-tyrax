@@ -12,6 +12,17 @@ inline Alias* Alias::sameNamePredecessor() const
 	return m_sameNamePredecessor;
 }
 
+inline void Alias::setDebugName( const std::string& name )
+{
+	if( m_debugName.empty() )
+		m_debugName = name;
+}
+
+inline const std::string& Alias::debugName() const
+{
+	return m_debugName;
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline void Alias::setAllocatedRegister( const Register* allocated )

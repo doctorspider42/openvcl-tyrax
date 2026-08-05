@@ -15,6 +15,7 @@
 
 #include <list>
 #include <iostream>
+#include <string>
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -66,6 +67,12 @@ public:
 	void setSameNamePredecessor( Alias* predecessor );
 	Alias* sameNamePredecessor() const;
 
+	// Diagnostics only: the source-level name this alias was created for.
+	// An Alias is otherwise anonymous, which leaves --show-reg-alloc unable
+	// to say WHICH value ended up sharing a register with which.
+	void setDebugName( const std::string& name );
+	const std::string& debugName() const;
+
 private:
 
 	Type m_type;
@@ -73,6 +80,7 @@ private:
 	unsigned int m_id;
 	const Register* m_allocatedRegister;
 	Alias* m_sameNamePredecessor;
+	std::string m_debugName;
 	std::list<Range> m_ranges;
 
 	static unsigned int s_nextId;

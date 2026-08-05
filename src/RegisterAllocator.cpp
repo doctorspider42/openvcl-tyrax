@@ -10,6 +10,7 @@
 
 
 #include "RegisterAllocator.h"
+#include "VuSchedulingRules.h"
 #include "BranchState.h"
 #include "Error.h"
 #include "VuTokenResourceAccess.h"
@@ -610,7 +611,9 @@ bool RegisterAllocator::processAliases()
 		for( AliasMap::iterator i = m_aliases.begin(); i != m_aliases.end(); ++i )
 		{
 			Alias* alias = i->first;
-			std::cerr << (alias->type() == Alias::FLOAT ? "FLOAT" : "INT") << ": ";
+			std::cerr << (alias->type() == Alias::FLOAT ? "FLOAT" : "INT") << " "
+			          << (alias->debugName().empty() ? "?" : alias->debugName())
+			          << " #" << alias->id() << ": ";
 			if( alias->allocatedRegister() )
 				std::cerr << "[prealloc: " << alias->allocatedRegister()->name() << "] ";
 			alias->printRanges( std::cerr );
@@ -796,11 +799,27 @@ bool RegisterAllocator::processAliases()
 			if( m_showRegisterInfo )
 			{
 				std::cerr << "Failed to allocate " << (dest->type() == Alias::FLOAT ? "FLOAT" : "INTEGER")
-				          << " register for alias" << std::endl;
+				          << " register for alias " << (dest->debugName().empty() ? "?" : dest->debugName())
+				          << " #" << dest->id() << std::endl;
 			}
 			return false;
 		}
 		//assert( dest->allocatedRegister() );
+	}
+
+	if( m_showRegisterInfo )
+	{
+		std::cerr << std::endl << "=== Final assignment ===" << std::endl;
+		for( AliasMap::iterator i = m_aliases.begin(); i != m_aliases.end(); ++i )
+		{
+			Alias* alias = i->first;
+			std::cerr << alias->allocatedRegister()->name() << " <- "
+			          << (alias->debugName().empty() ? "?" : alias->debugName())
+			          << " #" << alias->id() << "  ";
+			alias->printRanges( std::cerr );
+			std::cerr << std::endl;
+		}
+		std::cerr << "====================" << std::endl << std::endl;
 	}
 
 	return true;
@@ -905,21 +924,47 @@ bool RegisterAllocator::loopTargetHasLoopDirective( std::list<Token>::iterator t
 
 void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsigned int loopStart, unsigned int loopEnd )
 {
+	// Which float aliases does this loop body touch, and is the FIRST touch a read?
+	// Only a read-first alias is live across the back edge - the next iteration
+	// depends on what the previous one left in it. An alias written before it is read
+	// inside the body is a temporary and its own range already covers it; stretching
+	// those over the whole loop is what runs the allocator out of registers.
 	std::set<Alias*> aliases;
+	std::set<Alias*> liveInAliases;
+	std::set<Alias*> touched;
 	for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t )
 	{
 		if( t->lineNumber() < loopStart || t->lineNumber() > loopEnd )
 			continue;
 
+		std::set<Alias*> readHere;
+		std::set<Alias*> tokenAliases;
 		for( std::list<Token::Argument>::const_iterator a = t->arguments().begin(); a != t->arguments().end(); ++a )
 		{
 			if( a->content() != Token::Argument::ALIAS || !a->dependency() || !a->dependency()->alias() )
 				continue;
 			Alias* alias = a->dependency()->alias();
-			if( alias->type() == Alias::FLOAT )
-				aliases.insert( alias );
+			if( alias->type() != Alias::FLOAT )
+				continue;
+			aliases.insert( alias );
+			tokenAliases.insert( alias );
+			if( !(a->flags() & Token::Argument::WRITE) )
+				readHere.insert( alias );
+		}
+
+		// One token can both read and write the same alias (`add a, a, b`), and that
+		// still reads what the previous iteration left, so the read wins.
+		for( std::set<Alias*>::iterator i = tokenAliases.begin(); i != tokenAliases.end(); ++i )
+		{
+			if( touched.find( *i ) != touched.end() )
+				continue;
+			touched.insert( *i );
+			if( readHere.find( *i ) != readHere.end() )
+				liveInAliases.insert( *i );
 		}
 	}
+	if( vuLoopLivenessAlwaysEnabled() )
+		aliases = liveInAliases;
 
 	unsigned int availableFloats = 0;
 	for( unsigned int i = 0; i < 32; ++i )
@@ -938,11 +983,85 @@ void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsi
 			overlappingAliases.insert( alias );
 	}
 
-	if( overlappingAliases.size() > availableFloats )
+	// Skipping the extension is not a licence to emit wrong code: a value live
+	// across the back edge whose range was not extended gets its register handed
+	// to another name. --loop-liveness-always keeps the extension and lets
+	// allocation fail loudly instead.
+	if( !vuLoopLivenessAlwaysEnabled()
+	    && overlappingAliases.size() > availableFloats )
 		return;
 
 	for( std::set<Alias*>::iterator a = aliases.begin(); a != aliases.end(); ++a )
 		(*a)->addRange( loopStart, loopEnd );
+
+	tieCarriedWritesToLiveInAliases( tokens, loopStart, loopEnd, liveInAliases );
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void RegisterAllocator::tieCarriedWritesToLiveInAliases( std::list<Token>& tokens,
+                                                         unsigned int loopStart, unsigned int loopEnd,
+                                                         const std::set<Alias*>& liveInAliases )
+{
+	// A name read before it is written inside the body is carried across the back
+	// edge, and the readers at the top of the loop hold ONE alias for it. But a
+	// fresh Alias is spawned for every write, so the update at the bottom of the
+	// loop is a different alias - free to land in a different register. The write
+	// then goes nowhere the reader looks: the next iteration sees what the previous
+	// one saw, forever.
+	//
+	// Worse, those tail aliases get a live range one line long - the line of the
+	// write itself - because nothing downstream reads them. Two such ranges do not
+	// intersect, so the allocator may legally put two different carried names in one
+	// register, where the second write destroys the first.
+	//
+	// Both follow from the same omission, so both have one fix: tie every in-loop
+	// write of a carried name to the alias its readers use. openvcl already has the
+	// machinery - the two-address chain, which exists so `isubiu x, x, 1` writes the
+	// register it read - and the chain pre-pass then hands the whole chain a single
+	// register.
+	std::map<std::string, Alias*> carriedByName;
+	for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t )
+	{
+		if( t->lineNumber() < loopStart || t->lineNumber() > loopEnd )
+			continue;
+		for( std::list<Token::Argument>::const_iterator a = t->arguments().begin(); a != t->arguments().end(); ++a )
+		{
+			if( a->content() != Token::Argument::ALIAS || !a->dependency() || !a->dependency()->alias() )
+				continue;
+			if( a->alias().empty() )
+				continue;
+			Alias* alias = a->dependency()->alias();
+			if( liveInAliases.find( alias ) == liveInAliases.end() )
+				continue;
+			if( carriedByName.find( a->alias() ) == carriedByName.end() )
+				carriedByName[ a->alias() ] = alias;
+		}
+	}
+
+	for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t )
+	{
+		if( t->lineNumber() < loopStart || t->lineNumber() > loopEnd )
+			continue;
+		for( std::list<Token::Argument>::const_iterator a = t->arguments().begin(); a != t->arguments().end(); ++a )
+		{
+			if( !(a->flags() & Token::Argument::WRITE) )
+				continue;
+			if( a->content() != Token::Argument::ALIAS || !a->dependency() || !a->dependency()->alias() )
+				continue;
+			Alias* written = a->dependency()->alias();
+			std::map<std::string, Alias*>::iterator carried = carriedByName.find( a->alias() );
+			if( carried == carriedByName.end() )
+				continue;
+			if( written == carried->second )
+				continue;
+			// An existing chain already says where this write must live; a carried
+			// name cannot claim it too without contradicting the earlier link.
+			if( written->sameNamePredecessor() )
+				continue;
+			written->setSameNamePredecessor( carried->second );
+		}
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -973,7 +1092,14 @@ void RegisterAllocator::extendLoopDirectiveLiveRanges( std::list<Token>& tokens 
 		std::list<Token>::iterator target = label->second;
 		if( target->lineNumber() >= branch->lineNumber() )
 			continue;
-		if( !loopTargetHasLoopDirective( target, tokens.end() ) )
+		// A back edge is a back edge whether or not the source marked it with a --loop
+		// directive: a value written at the bottom and read at the top is live across
+		// it either way. Requiring the directive means a plain `label: ... ibne label`
+		// loop - which is what hand-written VU code looks like - gets no extension at
+		// all, and the allocator then hands one register to two live names.
+		// See --loop-liveness-always.
+		if( !vuLoopLivenessAlwaysEnabled()
+		    && !loopTargetHasLoopDirective( target, tokens.end() ) )
 			continue;
 
 		extendLoopDirectiveRange( tokens, target->lineNumber(), branch->lineNumber() );
@@ -1216,7 +1342,12 @@ void RegisterAllocator::extendMultiQStageRange( std::list<Token>& tokens, unsign
 			overlappingAliases.insert( alias );
 	}
 
-	if( overlappingAliases.size() > availableFloats )
+	// Skipping the extension is not a licence to emit wrong code: a value live
+	// across the back edge whose range was not extended gets its register handed
+	// to another name. --loop-liveness-always keeps the extension and lets
+	// allocation fail loudly instead.
+	if( !vuLoopLivenessAlwaysEnabled()
+	    && overlappingAliases.size() > availableFloats )
 		return;
 
 	for( std::set<Alias*>::iterator a = qStageAliases.begin(); a != qStageAliases.end(); ++a )

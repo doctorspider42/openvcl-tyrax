@@ -2057,6 +2057,7 @@ bool Parser::tokenize()
 	setVuIntegerLoadReadyCycles( m_cmdLine.sceLatencies() ? 3u : 0u );
 	setVuEmitDelayFillersEnabled( m_cmdLine.emitDelayFillers() );
 	setVuBranchInterlockEnabled( m_cmdLine.branchInterlock() );
+	setVuLoopLivenessAlwaysEnabled( m_cmdLine.loopLivenessAlways() );
 	setVuBranchBubbleOnDependencyEnabled( m_cmdLine.branchBubbleOnDependency() );
 
 	for( std::list<Line>::const_iterator i = m_lines.begin(); i != m_lines.end(); i++ )

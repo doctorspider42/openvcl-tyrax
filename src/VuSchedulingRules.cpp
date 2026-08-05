@@ -577,6 +577,7 @@ namespace
 	unsigned int g_integerLoadReadyCycles = 0;
 	bool g_emitDelayFillers = false;
 	bool g_branchInterlock = false;
+	bool g_loopLivenessAlways = false;
 	bool g_branchBubbleOnDependency = false;
 }
 
@@ -638,6 +639,16 @@ void setVuBranchBubbleOnDependencyEnabled( bool enabled )
 bool vuBranchBubbleOnDependencyEnabled()
 {
 	return g_branchBubbleOnDependency;
+}
+
+void setVuLoopLivenessAlwaysEnabled( bool enabled )
+{
+	g_loopLivenessAlways = enabled;
+}
+
+bool vuLoopLivenessAlwaysEnabled()
+{
+	return g_loopLivenessAlways;
 }
 
 void setVuBranchInterlockEnabled( bool enabled )

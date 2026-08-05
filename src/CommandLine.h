@@ -61,6 +61,7 @@ public:
 	bool sceLatencies() const;
 	bool emitDelayFillers() const;
 	bool branchInterlock() const;
+	bool loopLivenessAlways() const;
 	bool branchBubbleOnDependency() const;
 	bool genericSoftwarePipelining() const;
 	bool strictScheduleSlots() const;
@@ -141,6 +142,7 @@ private:
 		SCE_LATENCIES,
 		EMIT_DELAY_FILLERS,
 		BRANCH_INTERLOCK,
+		LOOP_LIVENESS_ALWAYS,
 		BRANCH_BUBBLE_ON_DEPENDENCY,
 		DISABLE_KNOWN_LOOP_OPTIMIZATIONS,
 		ENABLE_GENERIC_SOFTWARE_PIPELINING,
@@ -202,6 +204,7 @@ private:
 	bool m_sceLatencies;
 	bool m_emitDelayFillers;
 	bool m_branchInterlock;
+	bool m_loopLivenessAlways;
 	bool m_branchBubbleOnDependency;
 	bool m_genericSoftwarePipelining;
 	bool m_strictScheduleSlots;

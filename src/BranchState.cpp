@@ -235,6 +235,7 @@ void BranchState::updateDependency( Token::Argument& argument, State& state, Ali
 		Alias* newAlias = state.dependency() && depend ? state.dependency()->alias() : NULL;
 		if( !newAlias )
 			newAlias = m_allocator.obtainAlias( type );
+		newAlias->setDebugName( name );
 
 		newDependency = new Dependency;
 		newDependency->setAlias( newAlias );
