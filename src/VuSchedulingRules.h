@@ -75,6 +75,8 @@ bool vuFmacInterlockEnabled();
 // and 0x3FFFF/0x3F masks mean that fcand is testing the clipw right above it.
 void setVuFlagVisibilityLatency( unsigned int cycles );
 unsigned int vuFlagVisibilityLatency();
+void setVuClipFlagVisibilityLatency( unsigned int cycles );
+unsigned int vuClipFlagVisibilityLatency();
 
 // Cycles after which a memory load's destination may be read, or 0 to keep the
 // instruction table's latency+1. --sce-latencies sets 3 (see VuLatencyTracker).

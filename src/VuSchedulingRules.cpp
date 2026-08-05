@@ -574,6 +574,7 @@ namespace
 	bool g_scheduleFlagReaders = false;
 	bool g_fmacInterlock = false;
 	unsigned int g_flagVisibilityLatency = 4;
+	unsigned int g_clipFlagVisibilityLatency = 4;
 	unsigned int g_integerLoadReadyCycles = 0;
 	bool g_emitDelayFillers = false;
 	bool g_branchInterlock = false;
@@ -609,6 +610,23 @@ void setVuFlagVisibilityLatency( unsigned int cycles )
 unsigned int vuFlagVisibilityLatency()
 {
 	return g_flagVisibilityLatency;
+}
+
+// The CLIP flag is tracked separately from the MAC flags, because the two are not
+// interchangeable. MAC flags summarise the last FMAC; the CLIP flag register is a
+// 24-bit shift window into which every CLIP pushes six new bits. Reading it early
+// therefore does not return a partly-settled answer - it returns a DIFFERENT
+// vertex's answer, with the mask silently selecting the wrong window position. A
+// full-window test (0x3FFFF, "is anything outside") survives that; a single-bit
+// positional test does not, and that is what a Sutherland-Hodgman edge loop does.
+void setVuClipFlagVisibilityLatency( unsigned int cycles )
+{
+	g_clipFlagVisibilityLatency = cycles > 0 ? cycles : 1;
+}
+
+unsigned int vuClipFlagVisibilityLatency()
+{
+	return g_clipFlagVisibilityLatency;
 }
 
 void setVuIntegerLoadReadyCycles( unsigned int cycles )

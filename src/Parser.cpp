@@ -2054,6 +2054,7 @@ bool Parser::tokenize()
 	setVuScheduleFlagReadersEnabled( m_cmdLine.scheduleFlagReaders() );
 	setVuFmacInterlockEnabled( m_cmdLine.fmacInterlock() );
 	setVuFlagVisibilityLatency( m_cmdLine.sceLatencies() ? 1u : 4u );
+	setVuClipFlagVisibilityLatency( 4u );
 	setVuIntegerLoadReadyCycles( m_cmdLine.sceLatencies() ? 3u : 0u );
 	setVuEmitDelayFillersEnabled( m_cmdLine.emitDelayFillers() );
 	setVuBranchInterlockEnabled( m_cmdLine.branchInterlock() );

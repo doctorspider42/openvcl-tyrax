@@ -189,9 +189,12 @@ int VuLatencyTracker::readHazardDelayImpl( const Token& token,
 	}
 	if( readsClip )
 	{
+		// Not flagLatency: the CLIP window is positional, so --sce-latencies must
+		// not shorten this wait (see setVuClipFlagVisibilityLatency).
+		const int clipLatency = static_cast<int>( vuClipFlagVisibilityLatency() );
 		const int gap = flagCycle - m_lastClipwCycle;
-		if( flagLatency - gap > flagDelay )
-			flagDelay = flagLatency - gap;
+		if( clipLatency - gap > flagDelay )
+			flagDelay = clipLatency - gap;
 	}
 	if( flagDelay > 0 )
 		needed += flagDelay;
