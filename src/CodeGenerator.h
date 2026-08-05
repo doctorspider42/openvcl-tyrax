@@ -77,6 +77,8 @@ private:
 	void emitUpperWithWait( const Token& token, bool waitQ );
 	bool branchNeedsPreBubble( const Token& token ) const;
 	void padForBranchPreBubble( const Token& token );
+	void padForClipFlagWindow( const Token& a, const Token* b );
+	unsigned int emittedRowsSinceClipWrite() const;
 	bool slotCanBecomeBranchDelayFiller( const VuScheduledIssueSlot& slot,
 	                                     const Token& branch ) const;
 	bool scheduledSlotsFeedBranch( const std::vector<const VuScheduledIssueSlot*>& slots,

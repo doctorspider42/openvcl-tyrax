@@ -1639,6 +1639,80 @@ void CodeGenerator::padForBranchPreBubble( const Token& token )
 	}
 }
 
+unsigned int CodeGenerator::emittedRowsSinceClipWrite() const
+{
+	// How many instruction rows have been EMITTED since the row holding a CLIP.
+	//
+	// The scheduler already keeps its distance in cycles (VuLatencyTracker), and that
+	// is not the same measurement: a wait the hardware interlocks is a cycle that
+	// costs no word, so a four-cycle separation can come out as two emitted rows. The
+	// CLIP flag window is counted in instructions - six bits pushed in per CLIP - so
+	// this has to be checked where the words actually are.
+	//
+	// Read backwards over m_codeLines, skipping what is not an instruction row
+	// (labels, directives, source comments). A label is a barrier: the reader below it
+	// may be entered from somewhere else entirely, so the distance is unknown and
+	// padding it would be guesswork.
+	unsigned int rows = 0;
+	for( std::list<std::string>::const_reverse_iterator i = m_codeLines.rbegin();
+	     i != m_codeLines.rend(); ++i )
+	{
+		const std::string& line = *i;
+		const std::string::size_type first = line.find_first_not_of( " 	" );
+		if( first == std::string::npos )
+			continue;
+		if( line[first] == ';' || line[first] == '.' )
+			continue;
+		if( line[line.size() - 1] == ':' )
+			break;
+		// The mnemonic comes from the opcode metadata, never a literal - there is a
+		// unit test that enforces exactly that (test_codegen_instruction_literals).
+		if( line.find( vuInstr( VU_OP_CLIP ) ) != std::string::npos )
+			return rows;
+		++rows;
+		if( rows > 32 )
+			break;
+	}
+	return 0xFFFFu;
+}
+
+void CodeGenerator::padForClipFlagWindow( const Token& a, const Token* b )
+{
+	const unsigned int latency = vuClipFlagVisibilityLatency();
+	if( latency <= 1 )
+		return;
+
+	bool readsClip = false;
+	bool writesClip = false;
+	const Token* pair[2] = { &a, b };
+	for( int k = 0; k < 2; ++k )
+	{
+		if( !pair[k] || !pair[k]->operand() )
+			continue;
+		VuTokenResourceAccess access;
+		if( !buildVuTokenResourceAccess( *pair[k], access ) )
+			continue;
+		if( access.implicitReads & VU_RESOURCE_CLIP )
+			readsClip = true;
+		if( access.implicitWrites & VU_RESOURCE_CLIP )
+			writesClip = true;
+	}
+	// A row that both writes and reads the flag cannot be helped by padding above it;
+	// leave it to the scheduler rather than emit nops that change nothing.
+	if( !readsClip || writesClip )
+		return;
+
+	unsigned int rows = emittedRowsSinceClipWrite();
+	if( rows == 0xFFFFu )
+		return;
+	while( rows + 1 < latency )
+	{
+		addNopLine();
+		m_currentCycle++;
+		++rows;
+	}
+}
+
 void CodeGenerator::emitSingleToken( const Token& token )
 {
 	std::string instruction = generateInstruction(token);
@@ -1681,6 +1755,8 @@ void CodeGenerator::emitSingleToken( const Token& token )
 			outputLine += vuInstr(VU_OP_NOP);
 		}
 	}
+
+	padForClipFlagWindow( token, NULL );
 
 	const unsigned int branchDelaySlots = vuTokenBranchDelaySlots( token );
 	if( branchDelaySlots > 0 )
@@ -1791,6 +1867,7 @@ void CodeGenerator::emitPairedTokens( const Token& a, const Token& b )
 		pairedLine = formatPairedLine(b, a);
 	else
 		pairedLine = formatPairedLine(a, b);
+	padForClipFlagWindow( a, &b );
 	if( branchNeedsPreBubble(a) )
 		padForBranchPreBubble(a);
 	if( branchNeedsPreBubble(b) )
@@ -1814,6 +1891,7 @@ void CodeGenerator::emitPairedBranchWithDelayFiller( const Token& a, const Token
 		pairedLine = formatPairedLine(b, a);
 	else
 		pairedLine = formatPairedLine(a, b);
+	padForClipFlagWindow( a, &b );
 	if( branchNeedsPreBubble(a) )
 		padForBranchPreBubble(a);
 	if( branchNeedsPreBubble(b) )
