@@ -583,6 +583,9 @@ namespace
 	bool g_upperMoveWithW = false;
 	bool g_coalesceFloatWrites = false;
 	bool g_trimUncarriedRanges = false;
+	bool g_sinkLoads = false;
+	bool g_sinkLoadsAcrossStores = false;
+	bool g_sinkLoadsIntoLoops = false;
 	bool g_showPairMisses = false;
 	bool g_pairBestOfTwo = false;
 	bool g_pairBestOfMany = false;
@@ -726,6 +729,36 @@ void setVuTrimUncarriedRangesEnabled( bool enabled )
 bool vuTrimUncarriedRangesEnabled()
 {
 	return g_trimUncarriedRanges;
+}
+
+void setVuSinkLoadsEnabled( bool enabled )
+{
+	g_sinkLoads = enabled;
+}
+
+bool vuSinkLoadsEnabled()
+{
+	return g_sinkLoads;
+}
+
+void setVuSinkLoadsAcrossStoresEnabled( bool enabled )
+{
+	g_sinkLoadsAcrossStores = enabled;
+}
+
+bool vuSinkLoadsAcrossStoresEnabled()
+{
+	return g_sinkLoadsAcrossStores;
+}
+
+void setVuSinkLoadsIntoLoopsEnabled( bool enabled )
+{
+	g_sinkLoadsIntoLoops = enabled;
+}
+
+bool vuSinkLoadsIntoLoopsEnabled()
+{
+	return g_sinkLoadsIntoLoops;
 }
 
 // Diagnostics only: report why a row went out with one slot used.

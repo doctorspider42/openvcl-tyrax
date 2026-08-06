@@ -65,6 +65,9 @@ public:
 	bool upperMoveWithW() const;
 	bool coalesceFloatWrites() const;
 	bool trimUncarriedRanges() const;
+	bool sinkLoads() const;
+	bool sinkLoadsAcrossStores() const;
+	bool sinkLoadsIntoLoops() const;
 	bool showPairMisses() const;
 	bool pairBestOfTwo() const;
 	bool pairBestOfMany() const;
@@ -152,6 +155,9 @@ private:
 		UPPER_MOVE_WITH_W,
 		COALESCE_FLOAT_WRITES,
 		TRIM_UNCARRIED_RANGES,
+		SINK_LOADS,
+		SINK_LOADS_ACROSS_STORES,
+		SINK_LOADS_INTO_LOOPS,
 		SHOW_PAIR_MISSES,
 		PAIR_BEST_OF_TWO,
 		PAIR_BEST_OF_MANY,
@@ -220,6 +226,9 @@ private:
 	bool m_upperMoveWithW;
 	bool m_coalesceFloatWrites;
 	bool m_trimUncarriedRanges;
+	bool m_sinkLoads;
+	bool m_sinkLoadsAcrossStores;
+	bool m_sinkLoadsIntoLoops;
 	bool m_showPairMisses;
 	bool m_pairBestOfTwo;
 	bool m_pairBestOfMany;

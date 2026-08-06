@@ -100,6 +100,31 @@ private:
 	// into m_aliases so the existing interference check picks them up.
 	void collectLiteralRegisterUsage( std::list<Token>& tokens );
 
+	// --sink-loads.  Move each load down the token list to just before the value
+	// it loads is first read, or as far as a legal move goes.  Runs FIRST, before
+	// anything reads a line number, and renumbers the timeline from list position
+	// when it moved something, because after a splice the source line number is
+	// no longer an ordering.  Returns the number of loads moved.
+	unsigned int sinkLoadsToFirstUse( std::list<Token>& tokens );
+
+	// Where the given load may legally be re-inserted: the position just before
+	// the first token that either reads what it loaded or that it may not cross.
+	std::list<Token>::iterator sinkTargetForLoad( std::list<Token>::iterator load,
+	                                              std::list<Token>::iterator end ) const;
+
+	// --sink-loads-into-loops needs to know, for a candidate load, whether its
+	// address survives a trip round the loop it is about to be moved into. Both
+	// are program-wide facts, collected once per pass: every integer register
+	// key any token writes, and the base register of every store (with a flag
+	// for a store whose base could not be read, which forbids the motion
+	// outright).
+	std::set<std::string> m_sinkIntegerWrites;
+	std::map<std::string, std::set<long> > m_sinkStoreOffsets;
+	std::set<std::string> m_sinkStoreVagueBases;
+	std::set<std::string> m_sinkLoopHeaders;
+	std::map<std::string, unsigned int> m_sinkNameWrites;
+	bool m_sinkStoreBaseUnknown;
+
 	// --trim-uncarried-ranges.  Shrink a merged alias back to the extent of its
 	// own accesses when it provably dies at its last use inside one loop
 	// iteration.  Runs before the extension passes so those can still re-add

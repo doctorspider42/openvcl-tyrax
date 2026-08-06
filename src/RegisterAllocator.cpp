@@ -49,6 +49,7 @@ RegisterAllocator::RegisterAllocator()
 
 	m_dynamicThreshold = 16;
 	m_showRegisterInfo = false;
+	m_sinkStoreBaseUnknown = false;
 	m_currState = OUTSIDE;
 }
 
@@ -79,6 +80,15 @@ void RegisterAllocator::setAvailableIntegers( unsigned int integers  )
 bool RegisterAllocator::process( std::list<Token>& tokens )
 {
 	BranchState* branchState = NULL;
+
+	// First, before anything reads a line number: this is the one pass that
+	// reorders the token list, and it rewrites the timeline when it does.
+	if( vuSinkLoadsEnabled() )
+	{
+		const unsigned int sunk = sinkLoadsToFirstUse( tokens );
+		if( m_showRegisterInfo )
+			std::cerr << "--sink-loads moved " << sunk << " loads" << std::endl;
+	}
 
 	if( !collectLabels( tokens.begin(), tokens.end() ) )
 		return false;
@@ -1588,6 +1598,361 @@ namespace
 			loops.push_back( std::make_pair( label->second->lineNumber(), branch->lineNumber() ) );
 		}
 	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace
+{
+	// "vertex1.x" -> "vertex1".  buildVuTokenResourceAccess reports a float
+	// operand one component at a time; the sink pass cares about the value.
+	std::string sinkRegisterBase( const std::string& key )
+	{
+		const std::string::size_type dot = key.rfind( '.' );
+		if( std::string::npos == dot )
+			return key;
+		return key.substr( 0, dot );
+	}
+
+	// A load with no side effect beyond its destination: plain `lq`, not `lqi`
+	// or `lqd`, which also write the address register, and not one whose
+	// destination is a hardcoded VF register (nothing to relieve there).
+	bool tokenIsSinkableLoad( const Token& token, std::string& dest, std::string& base,
+	                          bool& hasOffset, long& offset )
+	{
+		hasOffset = false;
+		offset = 0;
+		if( !token.operand() )
+			return false;
+		if( token.operand()->flags() & Operand::PREPROCESSOR )
+			return false;
+		if( token.flags() & (Token::PREORDERED | Token::E | Token::D | Token::T
+		                     | Token::IGNORED | Token::BRANCH_DELAY_FILLER) )
+			return false;
+		if( !token.label().empty() )
+			return false;
+
+		VuTokenResourceAccess access;
+		if( !buildVuTokenResourceAccess( token, access ) )
+			return false;
+		if( access.memoryKind != VU_MEMORY_LOAD )
+			return false;
+		if( access.memoryFlags & (VU_MEMORY_FLAG_PREDEC | VU_MEMORY_FLAG_POSTINC) )
+			return false;
+		if( access.implicitWrites != VU_RESOURCE_NONE || access.implicitReads != VU_RESOURCE_NONE )
+			return false;
+		if( !access.hasMemoryBase )
+			return false;
+		if( access.registerWrites.empty() )
+			return false;
+
+		dest.clear();
+		for( std::list<std::string>::const_iterator i = access.registerWrites.begin();
+		     i != access.registerWrites.end(); ++i )
+		{
+			const std::string b = sinkRegisterBase( *i );
+			if( dest.empty() )
+				dest = b;
+			else if( dest != b )
+				return false;
+		}
+
+		// Only an alias is worth moving, and only an alias can be reasoned about
+		// here - a literal VFxx is already pinned to its register.
+		for( std::list<Token::Argument>::const_iterator a = token.arguments().begin();
+		     a != token.arguments().end(); ++a )
+		{
+			if( !(a->flags() & Token::Argument::WRITE) )
+				continue;
+			if( a->content() != Token::Argument::ALIAS )
+				return false;
+		}
+
+		base = access.memoryBaseRegister;
+		hasOffset = access.hasMemoryOffset;
+		offset = access.memoryOffset;
+		return true;
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+std::list<Token>::iterator RegisterAllocator::sinkTargetForLoad( std::list<Token>::iterator load,
+                                                                 std::list<Token>::iterator end ) const
+{
+	std::string dest;
+	std::string base;
+	std::list<Token>::iterator target = load;
+	++target;
+
+	bool hasOffset = false;
+	long offset = 0;
+	if( !tokenIsSinkableLoad( *load, dest, base, hasOffset, offset ) )
+		return target;
+
+	// --sink-loads-into-loops only: the position the load would stop at if a
+	// label were still a wall, kept so the whole excursion past a label can be
+	// abandoned when it turns out not to reach the value's first reader.
+	std::list<Token>::iterator beforeLabel = target;
+	bool crossedLabel = false;
+	bool crossedHeader = false;
+
+	// May this load be moved into the loop that starts at the next label? Two
+	// things have to hold across the back edge. The address must be the same
+	// next time round, so nothing anywhere may write the base register. And the
+	// load must be the only thing that ever writes the value, because re-running
+	// it every iteration throws away any other write - an accumulator seeded
+	// from memory above the loop would be reset each time. Tested here rather
+	// than at the label so a program where it does not hold behaves exactly as
+	// it does with the flag off.
+	std::map<std::string, unsigned int>::const_iterator writes = m_sinkNameWrites.find( dest );
+	bool mayCrossLabel = vuSinkLoadsIntoLoopsEnabled()
+		&& !base.empty()
+		&& hasOffset
+		&& m_sinkIntegerWrites.find( base ) == m_sinkIntegerWrites.end()
+		&& !m_sinkStoreBaseUnknown
+		&& m_sinkStoreVagueBases.find( base ) == m_sinkStoreVagueBases.end()
+		&& writes != m_sinkNameWrites.end() && writes->second == 1;
+
+	// Same base register, different constant offset: a different quadword, and
+	// that one IS provable. vu_script3_tce_cl spills its clipped triangle to
+	// 956(VI00) while every constant it loads sits at 8..21(VI00), so without
+	// this the whole preamble is pinned by a store that cannot reach it.
+	if( mayCrossLabel )
+	{
+		std::map<std::string, std::set<long> >::const_iterator s = m_sinkStoreOffsets.find( base );
+		if( s != m_sinkStoreOffsets.end() && s->second.find( offset ) != s->second.end() )
+			mayCrossLabel = false;
+	}
+
+	for( std::list<Token>::iterator i = target; i != end; ++i )
+	{
+		// A label starts another basic block: past it the load sits on a
+		// different path, and - the case that matters here - inside a loop it
+		// was outside of, where it would run once per iteration.
+		if( !i->label().empty() )
+		{
+			// Only the first loop header may be crossed: the load then runs once
+			// per iteration of THAT loop, and letting it fall into the inner
+			// per-vertex loop as well would pay for the register in the hottest
+			// place there is. Labels that are not branched back to cost nothing
+			// and do not count.
+			const bool header = m_sinkLoopHeaders.find( i->label() ) != m_sinkLoopHeaders.end();
+			if( !mayCrossLabel || (header && crossedHeader) )
+				break;
+			if( !crossedLabel )
+				beforeLabel = i;
+			crossedLabel = true;
+			if( header )
+				crossedHeader = true;
+			// A label-only token carries no operand, so let it through here
+			// rather than fall into the "not a VU instruction" wall below.
+			if( !i->operand() )
+			{
+				target = i;
+				++target;
+				continue;
+			}
+		}
+
+		// Anything the allocator does not model as a plain VU instruction is a
+		// wall: --cont and --exit are block boundaries, raw .vsm passthrough
+		// keeps its position by definition, and [E]/[D]/[T] mark the end.
+		if( !i->operand() )
+			break;
+		if( i->operand()->flags() & Operand::PREPROCESSOR )
+			break;
+		if( i->flags() & (Token::PREORDERED | Token::E | Token::D | Token::T | Token::IGNORED) )
+			break;
+		if( i->operand()->unit() == Operand::BRU )
+			break;
+
+		VuTokenResourceAccess access;
+		if( !buildVuTokenResourceAccess( *i, access ) )
+			break;
+
+		// The reader we are sinking towards, or a redefinition - either way the
+		// load has to stay in front of it.
+		bool touchesDest = false;
+		for( std::list<std::string>::const_iterator r = access.registerReads.begin();
+		     !touchesDest && r != access.registerReads.end(); ++r )
+			touchesDest = (sinkRegisterBase( *r ) == dest);
+		for( std::list<std::string>::const_iterator w = access.registerWrites.begin();
+		     !touchesDest && w != access.registerWrites.end(); ++w )
+			touchesDest = (sinkRegisterBase( *w ) == dest);
+		if( touchesDest )
+		{
+			// Landing in front of a token that carries a label is not the same
+			// as landing in front of the token: a branch to that label jumps
+			// straight past the load. And an excursion past a label is only
+			// worth its per-iteration cost if it got all the way to the reader,
+			// which this is.
+			if( crossedLabel && !i->label().empty() )
+				return beforeLabel;
+			return target;
+		}
+
+		// Memory ordering. A load that crosses the store that wrote its own
+		// quadword reads the wrong value, and nothing here can prove that a
+		// store through some other base register misses what we are about to
+		// read, so by default any store stops the load. That costs real ground -
+		// the generated loop bodies write the previous vertex's ADC bit halfway
+		// down and every later load piles up behind it - which is what
+		// --sink-loads-across-stores buys back, on the same different-base-means-
+		// different-quadword assumption SCE's vcl makes.
+		if( access.memoryKind == VU_MEMORY_XGKICK )
+			break;
+		if( access.memoryKind == VU_MEMORY_STORE )
+		{
+			if( !vuSinkLoadsAcrossStoresEnabled() )
+				break;
+			if( !access.hasMemoryBase || access.memoryBaseRegister == base )
+				break;
+		}
+
+		// The address has to still say the same thing when the load runs.
+		bool clobbersBase = false;
+		for( std::list<std::string>::const_iterator w = access.registerWrites.begin();
+		     !clobbersBase && w != access.registerWrites.end(); ++w )
+			clobbersBase = (sinkRegisterBase( *w ) == base);
+		if( clobbersBase )
+			break;
+
+		target = i;
+		++target;
+	}
+
+	// Fell out on a barrier or on the end of the program rather than on a
+	// reader. Whatever ground was gained past the label is not worth paying for
+	// once per iteration, so give it back.
+	return crossedLabel ? beforeLabel : target;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+unsigned int RegisterAllocator::sinkLoadsToFirstUse( std::list<Token>& tokens )
+{
+	// openvcl allocates over source order, and the VU authoring layer emits its
+	// loop bodies the way a human reads them: load everything the iteration
+	// needs, then use it. Six loaded quadwords are therefore live from the top
+	// of the body even though the code transforms them one at a time, and six
+	// registers is about the margin these programs are missing. SCE's vcl has no
+	// such problem because its scheduler places a load next to its reader:
+	// measured on its output for vu_script3_d, one VF register carries vertex1,
+	// then vertex2, then vertex3, reloaded each time.
+	//
+	// The token really moves. Recording the load as "sinkable", leaving it where
+	// it is and starting the range at the first read would be unsound - between
+	// the load and the read the register is not reserved, so another value can
+	// be given it and the loaded one is gone by the time it is read.
+	unsigned int moved = 0;
+
+	// Program-wide facts --sink-loads-into-loops needs before it may move a load
+	// across a loop header: an address register that something writes is not the
+	// same address next time round, and a store through the same base is the one
+	// store we know can hit what the load reads.
+	m_sinkIntegerWrites.clear();
+	m_sinkStoreOffsets.clear();
+	m_sinkStoreVagueBases.clear();
+	m_sinkLoopHeaders.clear();
+	m_sinkNameWrites.clear();
+	m_sinkStoreBaseUnknown = false;
+
+	// Which labels are the target of a backward branch, i.e. which ones a load
+	// would be moved INSIDE rather than merely past. Computed from list order,
+	// which is still the source order at this point.
+	{
+		std::map<std::string, unsigned int> labelIndex;
+		unsigned int index = 0;
+		for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t, ++index )
+			if( !t->label().empty() )
+				labelIndex[ t->label() ] = index;
+
+		index = 0;
+		for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t, ++index )
+		{
+			if( !t->operand() || t->operand()->unit() != Operand::BRU )
+				continue;
+			for( std::list<Token::Argument>::const_iterator a = t->arguments().begin();
+			     a != t->arguments().end(); ++a )
+			{
+				if( !(a->flags() & Token::Argument::BRANCH) || a->type() != Token::Argument::IMMEDIATE )
+					continue;
+				std::map<std::string, unsigned int>::const_iterator l = labelIndex.find( a->immediate() );
+				if( l != labelIndex.end() && l->second <= index )
+					m_sinkLoopHeaders.insert( a->immediate() );
+			}
+		}
+	}
+	for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t )
+	{
+		VuTokenResourceAccess access;
+		if( !t->operand() || (t->operand()->flags() & Operand::PREPROCESSOR) )
+			continue;
+		if( !buildVuTokenResourceAccess( *t, access ) )
+			continue;
+		std::set<std::string> written;
+		for( std::list<std::string>::const_iterator w = access.registerWrites.begin();
+		     w != access.registerWrites.end(); ++w )
+			written.insert( sinkRegisterBase( *w ) );
+		for( std::set<std::string>::const_iterator w = written.begin(); w != written.end(); ++w )
+		{
+			m_sinkIntegerWrites.insert( *w );
+			m_sinkNameWrites[ *w ] += 1;   // per TOKEN, not per component
+		}
+		// Stores only. xgkick READS the packet and hands it to the GIF - it
+		// writes no VU memory - and its register operand is not an indirect
+		// address, so counting it here only ever produced "some store has an
+		// address I cannot read", which switched the whole pass off.
+		if( access.memoryKind == VU_MEMORY_STORE )
+		{
+			if( !access.hasMemoryBase )
+				m_sinkStoreBaseUnknown = true;
+			else if( access.hasMemoryOffset )
+				m_sinkStoreOffsets[ access.memoryBaseRegister ].insert( access.memoryOffset );
+			else
+				m_sinkStoreVagueBases.insert( access.memoryBaseRegister );
+		}
+	}
+
+	// Every token, considered once, in source order. Walking the live list
+	// instead would revisit what the pass just moved: two loads that both stop
+	// at the same barrier take turns being last and leapfrog each other for
+	// ever. A list iterator survives a splice, so collecting them up front is
+	// enough - and going forwards keeps two loads that land against the same
+	// barrier in the order they were written.
+	std::vector< std::list<Token>::iterator > order;
+	for( std::list<Token>::iterator i = tokens.begin(); i != tokens.end(); ++i )
+		order.push_back( i );
+
+	for( unsigned int k = 0; k < order.size(); ++k )
+	{
+		const std::list<Token>::iterator load = order[k];
+
+		std::list<Token>::iterator next = load;
+		++next;
+
+		const std::list<Token>::iterator target = sinkTargetForLoad( load, tokens.end() );
+		if( target != next )
+		{
+			tokens.splice( target, tokens, load );
+			moved++;
+		}
+	}
+
+	if( moved )
+	{
+		// The timeline the whole allocator runs on is the token's line number,
+		// and after a splice that number is no longer an ordering. Re-derive it
+		// from list position, once, so the two cannot disagree again. The Line
+		// the token was parsed from is untouched, so every diagnostic still
+		// points at the source the user wrote.
+		unsigned int line = 1;
+		for( std::list<Token>::iterator i = tokens.begin(); i != tokens.end(); ++i )
+			i->setLineNumber( line++ );
+	}
+
+	return moved;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

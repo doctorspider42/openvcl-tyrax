@@ -177,6 +177,13 @@ public:
 	const Line& line() const;
 	unsigned int lineNumber() const; // Safe accessor that uses cached value
 
+	// The allocator's TIMELINE, not the source line.  They start out equal and
+	// stay equal unless a pass reorders the token list, in which case the
+	// timeline is re-derived from list position and this is how it is written
+	// back.  line().number() / line().originalNumber() keep pointing at the
+	// source the user wrote, which is what every diagnostic must report.
+	void setLineNumber( unsigned int number );
+
 	void setLabel( const std::string& label );
 	const std::string& label() const;
 

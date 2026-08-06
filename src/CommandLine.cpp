@@ -84,6 +84,9 @@ CommandLine::CommandLine()
 	m_upperMoveWithW = false;
 	m_coalesceFloatWrites = false;
 	m_trimUncarriedRanges = false;
+	m_sinkLoads = false;
+	m_sinkLoadsAcrossStores = false;
+	m_sinkLoadsIntoLoops = false;
 	m_showPairMisses = false;
 	m_pairBestOfTwo = false;
 	m_pairBestOfMany = false;
@@ -147,6 +150,9 @@ CommandLine::CommandLine()
 	m_options.push_back(Option(0,"upper-move-with-w",UPPER_MOVE_WITH_W,false));
 	m_options.push_back(Option(0,"coalesce-float-writes",COALESCE_FLOAT_WRITES,false));
 	m_options.push_back(Option(0,"trim-uncarried-ranges",TRIM_UNCARRIED_RANGES,false));
+	m_options.push_back(Option(0,"sink-loads",SINK_LOADS,false));
+	m_options.push_back(Option(0,"sink-loads-across-stores",SINK_LOADS_ACROSS_STORES,false));
+	m_options.push_back(Option(0,"sink-loads-into-loops",SINK_LOADS_INTO_LOOPS,false));
 	m_options.push_back(Option(0,"show-pair-misses",SHOW_PAIR_MISSES,false));
 	m_options.push_back(Option(0,"pair-best-of-two",PAIR_BEST_OF_TWO,false));
 	m_options.push_back(Option(0,"pair-best-of-many",PAIR_BEST_OF_MANY,false));
@@ -274,6 +280,9 @@ bool CommandLine::parse( int argc, char* argv[] )
 				case UPPER_MOVE_WITH_W: m_upperMoveWithW = true; break;
 				case COALESCE_FLOAT_WRITES: m_coalesceFloatWrites = true; break;
 				case TRIM_UNCARRIED_RANGES: m_trimUncarriedRanges = true; break;
+				case SINK_LOADS: m_sinkLoads = true; break;
+				case SINK_LOADS_ACROSS_STORES: m_sinkLoadsAcrossStores = true; break;
+				case SINK_LOADS_INTO_LOOPS: m_sinkLoadsIntoLoops = true; break;
 				case SHOW_PAIR_MISSES: m_showPairMisses = true; break;
 				case PAIR_BEST_OF_TWO: m_pairBestOfTwo = true; break;
 				case PAIR_BEST_OF_MANY: m_pairBestOfMany = true; break;

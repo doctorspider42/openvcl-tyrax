@@ -278,9 +278,9 @@ void BranchState::updateDependency( Token::Argument& argument, State& state, Ali
 			if( (*k).isEntryPoint() )
 				entry = &*(*k).location();
 			else
-				newDependency->alias()->addRange( entry->line().number(), (*(*k).location()).lineNumber() );
+				newDependency->alias()->addRange( entry->lineNumber(), (*(*k).location()).lineNumber() );
 		}
-		newDependency->alias()->addRange( entry->line().number(), (*current()).lineNumber() );
+		newDependency->alias()->addRange( entry->lineNumber(), (*current()).lineNumber() );
 
 		if( state.dependency() )
 			newDependency->depend( state.dependency() );

@@ -139,6 +139,54 @@ bool vuCoalesceFloatWritesEnabled();
 // the one change here that could hide a real carry if the test were wrong.
 void setVuTrimUncarriedRangesEnabled( bool enabled );
 bool vuTrimUncarriedRangesEnabled();
+
+// --sink-loads: move a load down to just before the value it loads is first
+// read, which is what SCE's vcl achieves by scheduling and openvcl never could,
+// because the allocator only ever saw source order. The generated programs load
+// vertex1/2/3 and normal1/2/3 at the top of the loop body and then transform
+// them one at a time, so six registers are pinned where two are in use; Sony's
+// output for the same source holds one vertex at a time and reloads into the
+// register the previous one just freed. The load moves for real - the token is
+// spliced in the list and the allocator's timeline re-derived from list
+// position - because a range computed from the first read while the load is
+// still emitted early is unsound: the register is unreserved between the two,
+// and something else can take it. Off by default: it reorders the emitted
+// program, so register names and instruction placement change everywhere.
+void setVuSinkLoadsEnabled( bool enabled );
+bool vuSinkLoadsEnabled();
+
+// --sink-loads-across-stores: let a sinking load pass a store that writes
+// through a DIFFERENT base register. Nothing in the source proves the two
+// quadwords are distinct, so this is an aliasing assumption and it gets its own
+// flag - but it is the assumption SCE's vcl makes. Its own output for
+// vu_script3_d puts `lq.xyz VF25,2(VI05)` at row 199, after three stores through
+// VI07 at rows 162, 181 and 198, from a source line that sits above all three.
+// Without it the generated loop bodies stop dead at the isw that writes the
+// previous vertex's ADC bit and every later load piles up behind it. Only has an
+// effect together with --sink-loads.
+void setVuSinkLoadsAcrossStoresEnabled( bool enabled );
+bool vuSinkLoadsAcrossStoresEnabled();
+
+// --sink-loads-into-loops: let a sinking load pass ONE label, so a value loaded
+// in the preamble and read inside the batch loop is loaded inside that loop
+// instead. The four GIF-tag quadwords are the reason: gifSetTag, lodGifTag,
+// testsTag and alphaGifTag are read only by the seven `sq`s that build the
+// packet header, but because the load sits above `begin:` their ranges span the
+// whole program, and they are 4 of the 32 values live at the vertex loop's
+// pressure peak. This is rematerialization, and it is paid for per loop
+// iteration, so the motion is only taken when it reaches the value's first
+// reader - stopping halfway would pay the instruction and free nothing - and
+// only one LOOP HEADER may be crossed, which keeps a preamble load out of the
+// inner per-vertex loop (a label nothing branches back to costs nothing and does
+// not count). Four conditions make it sound over the back edge: the address
+// register is written nowhere in the program, no store can reach the quadword
+// (same base and same constant offset - a different offset on the same base is a
+// different quadword and is allowed), the load is the only thing that ever
+// writes the value, and the reader it lands in front of carries no label of its
+// own for a branch to jump straight past it to. Only has an effect together
+// with --sink-loads.
+void setVuSinkLoadsIntoLoopsEnabled( bool enabled );
+bool vuSinkLoadsIntoLoopsEnabled();
 void setVuShowPairMissesEnabled( bool enabled );
 bool vuShowPairMissesEnabled();
 void setVuPairBestOfTwoEnabled( bool enabled );

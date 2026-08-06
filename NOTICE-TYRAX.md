@@ -54,6 +54,28 @@ known-good reference, no disassembly of anything. With all six, the engine's res
 VU1 program set needs **2040** instructions against Sony's 2042, and the rendered
 frame is pixel-identical in PCSX2.
 
+**Register allocation — five more flags, every one off by default**
+
+The six above make the code denser; these make it fit. TyraX's VU authoring layer
+generates 45 microprograms and Sony's `vcl` compiles all 45; this copy compiled 23,
+every failure being *Register allocation ran out of registers*.
+
+| flag | effect |
+|---|---|
+| `--trim-uncarried-ranges` | rebuild a live range from the alias's own accesses, when the value provably dies at its last use inside one iteration |
+| `--coalesce-float-writes` | give a float write the register its own previous value already sits in, when that value is dead from the write on |
+| `--sink-loads` | move a load down the token list to just before the value it loads is first read, and re-derive the allocator's timeline from list position |
+| `--sink-loads-across-stores` | let a sinking load pass a store through a *different* base register — an aliasing assumption, and the one SCE's `vcl` makes in its own output |
+| `--sink-loads-into-loops` | let a sinking load pass one loop header, so a preamble load whose only readers are inside the batch loop stops pinning a register across the whole program |
+
+With all five on top of the six above, **44 of the 45** compile and assemble, all
+clean under TyraX's loop-carry checker, and the engine's resident VU1 set needs
+**2008** instructions against Sony's 2028 for the same ten programs. The 45th,
+`vu_script3_tce_cl`, peaks at 33 simultaneously live float ranges against 31
+registers: its GIF-tag loads cannot reach their stores without crossing the
+conditional branch that picks the destination address, and placing a load past a
+branch needs a dominance analysis this copy does not have.
+
 ## Known defects in this copy
 
 * `stapip_as_is_c`-style programs: a value loaded above a batch loop can be reused
