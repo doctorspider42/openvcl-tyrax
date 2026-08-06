@@ -1690,7 +1690,12 @@ bool CodeGenerator::clipReadIsPositional( const Token& token ) const
 		if( text.empty() )
 			continue;
 		const unsigned long mask = std::strtoul( text.c_str(), NULL, 0 );
-		return mask != 0 && mask < 0x3FFFFul;
+		// Only the whole-window masks are safe to read adjacent to their CLIP: they
+		// ask "is anything outside" and every entry answers the same way. A mask
+		// that names particular entries - one bit, or several entries OR-ed - is
+		// reading positions, and a position that has not arrived yet is a different
+		// vertex's answer.
+		return mask != 0 && mask != 0x3FFFFul && mask != 0xFFFFFFul;
 	}
 	return true;      // no mask to judge by: assume it matters
 }
