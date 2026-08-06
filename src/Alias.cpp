@@ -144,6 +144,52 @@ bool Alias::hasRangeStartingBefore( unsigned int line ) const
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+bool Alias::rangeExtent( unsigned int& start, unsigned int& stop ) const
+{
+	if( m_ranges.empty() )
+		return false;
+
+	std::list<Range>::const_iterator i = m_ranges.begin();
+	start = i->m_start;
+	stop = i->m_stop;
+	for( ++i; i != m_ranges.end(); ++i )
+	{
+		start = min( start, i->m_start );
+		stop = max( stop, i->m_stop );
+	}
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void Alias::clipRanges( unsigned int start, unsigned int stop )
+{
+	if( start > stop )
+		return;
+
+	std::list<Range>::iterator i = m_ranges.begin();
+	while( i != m_ranges.end() )
+	{
+		if( i->m_stop < start || i->m_start > stop )
+		{
+			i = m_ranges.erase( i );
+			continue;
+		}
+		i->m_start = max( i->m_start, start );
+		i->m_stop = min( i->m_stop, stop );
+		++i;
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void Alias::clearRanges()
+{
+	m_ranges.clear();
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 void Alias::printRanges( std::ostream& os ) const
 {
 	os << "ranges: ";

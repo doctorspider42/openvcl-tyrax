@@ -115,6 +115,30 @@ bool vuBranchBubbleOnDependencyEnabled();
 void setVuLoopLivenessAlwaysEnabled( bool enabled );
 void setVuUpperMoveWithWEnabled( bool enabled );
 bool vuUpperMoveWithWEnabled();
+
+// --coalesce-float-writes: give a float write the register its own previous
+// value already sits in, when that previous value is dead from the write on.
+// openvcl spawns a fresh Alias per write, so a two-address self-update chain
+// (`mul.x a,a,b` - 3673 of them across the generated programs, against 57 plain
+// `move`s) burns a second register for a value that never needed one. The
+// integer side has done this since the isubiu loop-counter fix; this is the
+// float half. Off by default: it changes which register a program lands in, and
+// upstream's fixtures pin those names.
+void setVuCoalesceFloatWritesEnabled( bool enabled );
+bool vuCoalesceFloatWritesEnabled();
+
+// --trim-uncarried-ranges: a value defined and consumed inside one iteration of
+// one loop does not have to hold its register for the whole loop. openvcl's
+// branch-state analysis merges the aliases of a name across the back edge and
+// stretches the survivor from the loop's entry point to its last line, so a
+// per-vertex temporary looks exactly like a loop-carried accumulator. Trim such
+// a range back to [first access, last access], but ONLY when every component
+// read is written earlier in the same iteration, every access sits inside the
+// same loop, and no branch lies between the two ends - i.e. only when the value
+// provably dies at its last use. Off by default: it removes liveness, so it is
+// the one change here that could hide a real carry if the test were wrong.
+void setVuTrimUncarriedRangesEnabled( bool enabled );
+bool vuTrimUncarriedRangesEnabled();
 void setVuShowPairMissesEnabled( bool enabled );
 bool vuShowPairMissesEnabled();
 void setVuPairBestOfTwoEnabled( bool enabled );

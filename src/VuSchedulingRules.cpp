@@ -581,6 +581,8 @@ namespace
 	bool g_branchInterlock = false;
 	bool g_loopLivenessAlways = false;
 	bool g_upperMoveWithW = false;
+	bool g_coalesceFloatWrites = false;
+	bool g_trimUncarriedRanges = false;
 	bool g_showPairMisses = false;
 	bool g_pairBestOfTwo = false;
 	bool g_pairBestOfMany = false;
@@ -704,6 +706,26 @@ void setVuUpperMoveWithWEnabled( bool enabled )
 bool vuUpperMoveWithWEnabled()
 {
 	return g_upperMoveWithW;
+}
+
+void setVuCoalesceFloatWritesEnabled( bool enabled )
+{
+	g_coalesceFloatWrites = enabled;
+}
+
+bool vuCoalesceFloatWritesEnabled()
+{
+	return g_coalesceFloatWrites;
+}
+
+void setVuTrimUncarriedRangesEnabled( bool enabled )
+{
+	g_trimUncarriedRanges = enabled;
+}
+
+bool vuTrimUncarriedRangesEnabled()
+{
+	return g_trimUncarriedRanges;
 }
 
 // Diagnostics only: report why a row went out with one slot used.

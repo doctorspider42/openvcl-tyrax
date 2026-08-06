@@ -2061,6 +2061,8 @@ bool Parser::tokenize()
 	setVuBranchInterlockEnabled( m_cmdLine.branchInterlock() );
 	setVuLoopLivenessAlwaysEnabled( m_cmdLine.loopLivenessAlways() );
 	setVuUpperMoveWithWEnabled( m_cmdLine.upperMoveWithW() );
+	setVuCoalesceFloatWritesEnabled( m_cmdLine.coalesceFloatWrites() );
+	setVuTrimUncarriedRangesEnabled( m_cmdLine.trimUncarriedRanges() );
 	setVuShowPairMissesEnabled( m_cmdLine.showPairMisses() );
 	setVuPairBestOfTwoEnabled( m_cmdLine.pairBestOfTwo() );
 	setVuPairBestOfManyEnabled( m_cmdLine.pairBestOfMany() );

@@ -82,6 +82,8 @@ CommandLine::CommandLine()
 	m_branchInterlock = false;
 	m_loopLivenessAlways = false;
 	m_upperMoveWithW = false;
+	m_coalesceFloatWrites = false;
+	m_trimUncarriedRanges = false;
 	m_showPairMisses = false;
 	m_pairBestOfTwo = false;
 	m_pairBestOfMany = false;
@@ -143,6 +145,8 @@ CommandLine::CommandLine()
 	m_options.push_back(Option(0,"branch-interlock",BRANCH_INTERLOCK,false));
 	m_options.push_back(Option(0,"loop-liveness-always",LOOP_LIVENESS_ALWAYS,false));
 	m_options.push_back(Option(0,"upper-move-with-w",UPPER_MOVE_WITH_W,false));
+	m_options.push_back(Option(0,"coalesce-float-writes",COALESCE_FLOAT_WRITES,false));
+	m_options.push_back(Option(0,"trim-uncarried-ranges",TRIM_UNCARRIED_RANGES,false));
 	m_options.push_back(Option(0,"show-pair-misses",SHOW_PAIR_MISSES,false));
 	m_options.push_back(Option(0,"pair-best-of-two",PAIR_BEST_OF_TWO,false));
 	m_options.push_back(Option(0,"pair-best-of-many",PAIR_BEST_OF_MANY,false));
@@ -268,6 +272,8 @@ bool CommandLine::parse( int argc, char* argv[] )
 				case BRANCH_INTERLOCK: m_branchInterlock = true; break;
 				case LOOP_LIVENESS_ALWAYS: m_loopLivenessAlways = true; break;
 				case UPPER_MOVE_WITH_W: m_upperMoveWithW = true; break;
+				case COALESCE_FLOAT_WRITES: m_coalesceFloatWrites = true; break;
+				case TRIM_UNCARRIED_RANGES: m_trimUncarriedRanges = true; break;
 				case SHOW_PAIR_MISSES: m_showPairMisses = true; break;
 				case PAIR_BEST_OF_TWO: m_pairBestOfTwo = true; break;
 				case PAIR_BEST_OF_MANY: m_pairBestOfMany = true; break;

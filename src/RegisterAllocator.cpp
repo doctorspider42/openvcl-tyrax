@@ -263,14 +263,55 @@ bool RegisterAllocator::process( std::list<Token>& tokens )
 			return false;
 	}
 
+	// Before the extension passes, not after: trimming is allowed to undo the
+	// branch-state analysis's blanket stretch, but it must not be able to undo a
+	// liveness requirement one of the extensions below discovers.
+	if( vuTrimUncarriedRangesEnabled() )
+		trimUncarriedLoopLocalRanges( tokens );
+
 	collectLiteralRegisterUsage( tokens );
 	extendContinuationLiveRanges( tokens );
 	extendLoopDirectiveLiveRanges( tokens );
 	extendMultiQStageLiveRanges( tokens );
 
+	// After every extension: the deadness test below reads final ranges.
+	if( vuCoalesceFloatWritesEnabled() )
+		coalesceSameNameFloatWrites( tokens );
+
 	if( m_aliases.size() > 0 )
 	{
-		if( !processAliases() )
+		// Coalescing is a preference, not a requirement, and the chain pre-pass
+		// enforces it as a requirement: a chain must find ONE register free over
+		// the union of every member's range, and a long chain placed early can
+		// leave a later one with nothing. That turned vu0_rt_kernel - which
+		// allocates fine without the flag - into a failure. So allocate with the
+		// coalescing edges, and if that runs out, throw the edges away and
+		// allocate again. The flag can then only ever add programs that compile.
+		std::map<Alias*, const Register*> preallocated;
+		if( !m_coalescedWrites.empty() )
+		{
+			for( AliasMap::iterator i = m_aliases.begin(); i != m_aliases.end(); ++i )
+				preallocated[ i->first ] = i->first->allocatedRegister();
+		}
+
+		bool allocated = processAliases();
+
+		if( !allocated && !m_coalescedWrites.empty() )
+		{
+			for( std::map<Alias*, const Register*>::iterator i = preallocated.begin();
+			     i != preallocated.end(); ++i )
+				i->first->setAllocatedRegister( i->second );
+			for( unsigned int i = 0; i < m_coalescedWrites.size(); ++i )
+				m_coalescedWrites[i]->setSameNamePredecessor( NULL );
+			m_coalescedWrites.clear();
+
+			if( m_showRegisterInfo )
+				std::cerr << "Retrying allocation without --coalesce-float-writes" << std::endl;
+
+			allocated = processAliases();
+		}
+
+		if( !allocated )
 		{
 			Error::Display( Error( "Register allocation ran out of registers" ) );
 			return false;
@@ -1462,6 +1503,341 @@ void RegisterAllocator::collectLiteralRegisterUsage( std::list<Token>& tokens )
 					m_aliases[ integers[r] ] = integers[r];
 				}
 				integers[r]->addRange( line, line );
+			}
+		}
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace
+{
+	// One reference to an alias: which line, which components, and whether it
+	// was the destination.  Sources are recorded before the destination of the
+	// same token, which is the order the hardware sees them in.
+	struct AliasAccess
+	{
+		AliasAccess() : m_line(0), m_fields(0), m_write(false) {}
+		AliasAccess( unsigned int line, unsigned int fields, bool write )
+			: m_line(line), m_fields(fields), m_write(write) {}
+
+		unsigned int m_line;
+		unsigned int m_fields;
+		bool m_write;
+	};
+
+	// Which components an operand really touches.  A float source written
+	// without a selector is read under the instruction's destination mask - a
+	// `mini.xyz d,s,t` never looks at s.w - and openvcl leaves such an operand's
+	// field mask at zero, meaning "whatever the instruction says". Reading that
+	// zero as "all four" would make every masked read look like a read of an
+	// undefined w. An integer register has no components at all, so it is always
+	// whole.
+	unsigned int accessFields( const Token& token, const Token::Argument& argument )
+	{
+		const unsigned int all = Token::X | Token::Y | Token::Z | Token::W;
+		if( argument.type() == Token::Argument::INTEGER_REGISTER )
+			return all;
+		if( argument.fields() )
+			return argument.fields();
+		return token.fields() ? token.fields() : all;
+	}
+
+	bool tokenIsEmittable( const Token& token )
+	{
+		if( !token.operand() )
+			return false;
+		if( token.operand()->flags() & Operand::PREPROCESSOR )
+			return false;
+		if( token.flags() & Token::IGNORED )
+			return false;
+		return true;
+	}
+
+	// Every backward branch in the program, as [target line, branch line].
+	void collectBackEdges( std::list<Token>& tokens,
+	                       const std::map< std::string, std::list<Token>::iterator >& labels,
+	                       std::vector< std::pair<unsigned int, unsigned int> >& loops )
+	{
+		for( std::list<Token>::iterator branch = tokens.begin(); branch != tokens.end(); ++branch )
+		{
+			if( !branch->operand() || branch->operand()->unit() != Operand::BRU )
+				continue;
+
+			std::list<Token::Argument>::const_iterator dest = branch->arguments().end();
+			for( std::list<Token::Argument>::const_iterator a = branch->arguments().begin();
+			     a != branch->arguments().end(); ++a )
+			{
+				if( a->flags() & Token::Argument::BRANCH )
+				{
+					dest = a;
+					break;
+				}
+			}
+			if( dest == branch->arguments().end() || dest->type() != Token::Argument::IMMEDIATE )
+				continue;
+
+			std::map< std::string, std::list<Token>::iterator >::const_iterator label =
+				labels.find( dest->immediate() );
+			if( label == labels.end() )
+				continue;
+
+			if( label->second->lineNumber() >= branch->lineNumber() )
+				continue;
+
+			loops.push_back( std::make_pair( label->second->lineNumber(), branch->lineNumber() ) );
+		}
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void RegisterAllocator::trimUncarriedLoopLocalRanges( std::list<Token>& tokens )
+{
+	// The branch-state analysis merges every alias a source-level name ever had
+	// into one, and the trace machinery then stretches the survivor from the
+	// enclosing loop's entry point to the last line it walked. For a value that
+	// is recomputed from scratch every iteration - a transformed vertex, a
+	// per-vertex colour - that turns a range twenty lines long into one covering
+	// the whole loop body. Three of those cost three registers for nothing, and
+	// on a three-vertex batch that is the difference between fitting in 31 VF
+	// registers and not.
+	//
+	// A range may be pulled back to its own accesses only when the value dies at
+	// its last use, and the three conditions that establish that are all
+	// necessary:
+	//
+	//   * every component read is written by an EARLIER access, so the iteration
+	//     does not depend on what the previous one left behind;
+	//   * every access sits inside the same loops, so nothing outside a loop
+	//     defines a value read inside it (which WOULD have to survive the back
+	//     edge, and is what the extension passes exist to cover);
+	//   * no branch lies between the first and last access, so the access list
+	//     read in line order is the order the value actually sees. Without this
+	//     a definition on one arm of a conditional reads as covering both.
+	std::vector< std::pair<unsigned int, unsigned int> > loops;
+	collectBackEdges( tokens, m_labels, loops );
+
+	std::map< Alias*, std::vector<AliasAccess> > accesses;
+	std::vector<unsigned int> branchLines;
+
+	for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t )
+	{
+		if( !tokenIsEmittable( *t ) )
+			continue;
+
+		const unsigned int line = t->lineNumber();
+
+		if( t->operand()->unit() == Operand::BRU )
+			branchLines.push_back( line );
+
+		// Sources first, destination last - a token that reads and writes the
+		// same name reads the previous value.
+		for( int pass = 0; pass < 2; ++pass )
+		{
+			for( std::list<Token::Argument>::const_iterator a = t->arguments().begin();
+			     a != t->arguments().end(); ++a )
+			{
+				const bool write = (a->flags() & Token::Argument::WRITE) != 0;
+				if( write != (pass == 1) )
+					continue;
+				if( a->content() != Token::Argument::ALIAS || !a->dependency() || !a->dependency()->alias() )
+					continue;
+				accesses[ a->dependency()->alias() ].push_back(
+					AliasAccess( line, accessFields( *t, *a ), write ) );
+			}
+		}
+	}
+
+	for( std::map< Alias*, std::vector<AliasAccess> >::iterator i = accesses.begin();
+	     i != accesses.end(); ++i )
+	{
+		Alias* alias = i->first;
+		const std::vector<AliasAccess>& acc = i->second;
+
+		// An input or output register is pinned to a physical register by the
+		// --enter/--exit contract; its liveness is not ours to shorten.
+		if( alias->allocatedRegister() )
+			continue;
+		if( acc.empty() )
+			continue;
+
+		unsigned int lo = 0;
+		unsigned int hi = 0;
+		if( !alias->rangeExtent( lo, hi ) )
+			continue;
+
+		const unsigned int firstLine = acc.front().m_line;
+		const unsigned int lastLine = acc.back().m_line;
+		if( firstLine > lastLine )
+			continue;
+		(void)lo;
+		(void)hi;
+
+		// Condition 1: no component is read before it is written.
+		unsigned int defined = 0;
+		bool carried = false;
+		for( std::vector<AliasAccess>::const_iterator a = acc.begin(); a != acc.end(); ++a )
+		{
+			if( a->m_write )
+			{
+				defined |= a->m_fields;
+				continue;
+			}
+			if( a->m_fields & ~defined )
+			{
+				carried = true;
+				break;
+			}
+		}
+		if( carried )
+			continue;
+
+		// Condition 2: every loop either contains the whole span or misses it.
+		bool crossesLoop = false;
+		for( unsigned int l = 0; !crossesLoop && l < loops.size(); ++l )
+		{
+			const unsigned int start = loops[l].first;
+			const unsigned int stop = loops[l].second;
+			const bool overlaps = !(lastLine < start || stop < firstLine);
+			const bool contained = firstLine >= start && lastLine <= stop;
+			if( overlaps && !contained )
+				crossesLoop = true;
+		}
+		if( crossesLoop )
+			continue;
+
+		// Condition 3: straight-line control flow between the two ends.
+		bool branchInside = false;
+		for( unsigned int b = 0; !branchInside && b < branchLines.size(); ++b )
+		{
+			if( branchLines[b] > firstLine && branchLines[b] < lastLine )
+				branchInside = true;
+		}
+		if( branchInside )
+			continue;
+
+		// The precise thing: one interval per definition, from the defining line
+		// to that definition's last reader, per component. A scalar scratch name
+		// reused once per vertex is a merged alias with ONE range spanning the
+		// whole batch (vu_script3_d's `vuS1` is [86-229]); its three generations
+		// are independent, and the register is free in the holes between them.
+		// Nothing here invents liveness: every interval starts at a write this
+		// alias performs and ends at a read of that write.
+		std::vector< std::pair<unsigned int, unsigned int> > intervals;
+		for( unsigned int component = 0; component < 4; ++component )
+		{
+			const unsigned int mask = 1u << component;
+			bool open = false;
+			unsigned int defLine = 0;
+			unsigned int lastUse = 0;
+
+			for( std::vector<AliasAccess>::const_iterator a = acc.begin(); a != acc.end(); ++a )
+			{
+				if( !(a->m_fields & mask) )
+					continue;
+
+				if( a->m_write )
+				{
+					if( open )
+						intervals.push_back( std::make_pair( defLine, lastUse ) );
+					open = true;
+					defLine = a->m_line;
+					lastUse = a->m_line;
+				}
+				else if( open )
+					lastUse = a->m_line;
+			}
+
+			if( open )
+				intervals.push_back( std::make_pair( defLine, lastUse ) );
+		}
+
+		if( intervals.empty() )
+		{
+			alias->clipRanges( firstLine, lastLine );
+			continue;
+		}
+
+		alias->clearRanges();
+		for( unsigned int n = 0; n < intervals.size(); ++n )
+			alias->addRange( intervals[n].first, intervals[n].second );
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void RegisterAllocator::coalesceSameNameFloatWrites( std::list<Token>& tokens )
+{
+	// `mul.x fogAccum, fogAccum, fogParams[z]` is one value, but openvcl gives
+	// the read one Alias and the write another, and the two ranges touch on the
+	// shared line, so they interfere and the chain alternates between two
+	// registers. The integer side already fixes this - it had to, or `isubiu x,
+	// x, 1` decremented a register nobody read - via setSameNamePredecessor and
+	// the atomic chain pre-pass in processAliases. This is the same edge for
+	// floats, with one extra precondition the integer path gets for free: the
+	// predecessor must be dead from the write on. If it is still live afterwards
+	// the two values coexist, and sharing a register would destroy one of them.
+	std::map<std::string, Alias*> lastByName;
+
+	for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t )
+	{
+		if( !tokenIsEmittable( *t ) )
+			continue;
+
+		const unsigned int line = t->lineNumber();
+
+		for( int pass = 0; pass < 2; ++pass )
+		{
+			for( std::list<Token::Argument>::iterator a = t->arguments().begin();
+			     a != t->arguments().end(); ++a )
+			{
+				const bool write = (a->flags() & Token::Argument::WRITE) != 0;
+				if( write != (pass == 1) )
+					continue;
+				if( a->type() != Token::Argument::FLOAT_REGISTER )
+					continue;
+				if( a->content() != Token::Argument::ALIAS || !a->dependency() || !a->dependency()->alias() )
+					continue;
+
+				Alias* alias = a->dependency()->alias();
+				if( alias->type() != Alias::FLOAT )
+					continue;
+
+				if( !write )
+				{
+					lastByName[ a->alias() ] = alias;
+					continue;
+				}
+
+				std::map<std::string, Alias*>::iterator previous = lastByName.find( a->alias() );
+				if( previous != lastByName.end()
+				    && previous->second != alias
+				    && !alias->sameNamePredecessor()
+				    && !alias->allocatedRegister()
+				    && !previous->second->allocatedRegister() )
+				{
+					unsigned int lo = 0;
+					unsigned int hi = 0;
+					if( previous->second->rangeExtent( lo, hi ) && hi <= line )
+					{
+						// A chain must stay a chain: refuse an edge that would
+						// close a cycle, the same defence BranchState uses.
+						bool wouldCycle = false;
+						Alias* p = previous->second;
+						for( int hop = 0; hop < 32 && p; ++hop, p = p->sameNamePredecessor() )
+						{
+							if( p == alias ) { wouldCycle = true; break; }
+						}
+						if( !wouldCycle )
+						{
+							alias->setSameNamePredecessor( previous->second );
+							m_coalescedWrites.push_back( alias );
+						}
+					}
+				}
+
+				lastByName[ a->alias() ] = alias;
 			}
 		}
 	}

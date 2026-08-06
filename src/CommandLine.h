@@ -63,6 +63,8 @@ public:
 	bool branchInterlock() const;
 	bool loopLivenessAlways() const;
 	bool upperMoveWithW() const;
+	bool coalesceFloatWrites() const;
+	bool trimUncarriedRanges() const;
 	bool showPairMisses() const;
 	bool pairBestOfTwo() const;
 	bool pairBestOfMany() const;
@@ -148,6 +150,8 @@ private:
 		BRANCH_INTERLOCK,
 		LOOP_LIVENESS_ALWAYS,
 		UPPER_MOVE_WITH_W,
+		COALESCE_FLOAT_WRITES,
+		TRIM_UNCARRIED_RANGES,
 		SHOW_PAIR_MISSES,
 		PAIR_BEST_OF_TWO,
 		PAIR_BEST_OF_MANY,
@@ -214,6 +218,8 @@ private:
 	bool m_branchInterlock;
 	bool m_loopLivenessAlways;
 	bool m_upperMoveWithW;
+	bool m_coalesceFloatWrites;
+	bool m_trimUncarriedRanges;
 	bool m_showPairMisses;
 	bool m_pairBestOfTwo;
 	bool m_pairBestOfMany;

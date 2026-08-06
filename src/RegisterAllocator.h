@@ -99,6 +99,19 @@ private:
 	// happens to share VI01.  Synthesized as preallocated aliases inserted
 	// into m_aliases so the existing interference check picks them up.
 	void collectLiteralRegisterUsage( std::list<Token>& tokens );
+
+	// --trim-uncarried-ranges.  Shrink a merged alias back to the extent of its
+	// own accesses when it provably dies at its last use inside one loop
+	// iteration.  Runs before the extension passes so those can still re-add
+	// whatever liveness they genuinely require.
+	void trimUncarriedLoopLocalRanges( std::list<Token>& tokens );
+
+	// --coalesce-float-writes.  Tie a float write to the alias holding the same
+	// source-level name's previous value when that value is dead from here on,
+	// so the two-address chain pre-pass hands both one register.  Runs last, on
+	// final ranges, because the deadness test needs them.
+	void coalesceSameNameFloatWrites( std::list<Token>& tokens );
+
 	void extendContinuationLiveRanges( std::list<Token>& tokens );
 	void extendLoopDirectiveLiveRanges( std::list<Token>& tokens );
 	void extendMultiQStageLiveRanges( std::list<Token>& tokens );
@@ -131,6 +144,11 @@ private:
 	bool m_showRegisterInfo;
 
 	AliasMap m_aliases;
+
+	// Aliases whose sameNamePredecessor edge --coalesce-float-writes added, so
+	// the edges can be withdrawn and allocation retried if they cost more than
+	// they save.
+	std::vector<Alias*> m_coalescedWrites;
 };
 
 #include "RegisterAllocator.inl"

@@ -56,6 +56,18 @@ public:
 	bool hasRangeStartingBefore( unsigned int line ) const;
 	void printRanges( std::ostream& os ) const;
 
+	// Lowest start / highest stop over all ranges.  False when the alias has
+	// no range at all (nothing ever referenced it).
+	bool rangeExtent( unsigned int& start, unsigned int& stop ) const;
+
+	// Drop everything outside [start,stop] and shorten the ranges that
+	// straddle the boundary.  Only ever removes liveness, never adds it.
+	void clipRanges( unsigned int start, unsigned int stop );
+
+	// Throw the range list away, to be rebuilt with addRange.  Only for a caller
+	// that has computed the alias's liveness itself and can defend it.
+	void clearRanges();
+
 	// Two-address hint.  When the parser emits an instruction like
 	// `isubiu x, x, 1`, openvcl creates two Alias objects for `x` — the
 	// read picks up the existing alias, the write spawns a fresh one.
