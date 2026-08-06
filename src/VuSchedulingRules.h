@@ -113,6 +113,8 @@ bool vuBranchBubbleOnDependencyEnabled();
 // edge. The allocator's guard trades that correctness requirement for a compile
 // that succeeds, and the result is a value handed to two names at once.
 void setVuLoopLivenessAlwaysEnabled( bool enabled );
+void setVuUpperMoveWithWEnabled( bool enabled );
+bool vuUpperMoveWithWEnabled();
 bool vuLoopLivenessAlwaysEnabled();
 
 void setVuBranchInterlockEnabled( bool enabled );

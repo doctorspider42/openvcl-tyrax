@@ -10135,6 +10135,10 @@ std::string CodeGenerator::generateUpperMoveInstruction( const Token& token )
 		if(token.fields() & (1<<t))
 			fields += fieldnames[t];
 	}
+	// No suffix on the source means all four, so name them: emitting the empty mask
+	// verbatim produces `max.` with nothing after the dot, which dvp-as rejects.
+	if( fields.empty() )
+		fields = fieldnames;
 
 	std::list<Token::Argument>::const_iterator dst = token.arguments().begin();
 	std::list<Token::Argument>::const_iterator src = dst;

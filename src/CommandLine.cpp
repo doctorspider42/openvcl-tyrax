@@ -81,6 +81,7 @@ CommandLine::CommandLine()
 	m_emitDelayFillers = false;
 	m_branchInterlock = false;
 	m_loopLivenessAlways = false;
+	m_upperMoveWithW = false;
 	m_branchBubbleOnDependency = false;
 	m_genericSoftwarePipelining = true;
 	m_strictScheduleSlots = false;
@@ -138,6 +139,7 @@ CommandLine::CommandLine()
 	m_options.push_back(Option(0,"emit-delay-fillers",EMIT_DELAY_FILLERS,false));
 	m_options.push_back(Option(0,"branch-interlock",BRANCH_INTERLOCK,false));
 	m_options.push_back(Option(0,"loop-liveness-always",LOOP_LIVENESS_ALWAYS,false));
+	m_options.push_back(Option(0,"upper-move-with-w",UPPER_MOVE_WITH_W,false));
 	m_options.push_back(Option(0,"branch-bubble-on-dependency",BRANCH_BUBBLE_ON_DEPENDENCY,false));
 	m_options.push_back(Option('\0',"disable-known-loop-optimizations",DISABLE_KNOWN_LOOP_OPTIMIZATIONS,false));
 	m_options.push_back(Option('\0',"enable-generic-software-pipelining",ENABLE_GENERIC_SOFTWARE_PIPELINING,false));
@@ -259,6 +261,7 @@ bool CommandLine::parse( int argc, char* argv[] )
 				case EMIT_DELAY_FILLERS: m_emitDelayFillers = true; break;
 				case BRANCH_INTERLOCK: m_branchInterlock = true; break;
 				case LOOP_LIVENESS_ALWAYS: m_loopLivenessAlways = true; break;
+				case UPPER_MOVE_WITH_W: m_upperMoveWithW = true; break;
 				case BRANCH_BUBBLE_ON_DEPENDENCY: m_branchBubbleOnDependency = true; break;
 				case DISABLE_KNOWN_LOOP_OPTIMIZATIONS: m_knownLoopOptimizations = false; break;
 				case ENABLE_GENERIC_SOFTWARE_PIPELINING: m_genericSoftwarePipelining = true; break;

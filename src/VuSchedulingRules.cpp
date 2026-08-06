@@ -404,7 +404,7 @@ bool isVuMoveAsUpperMaxCandidate( const Token& token )
 		return false;
 
 	unsigned int fields = token.fields();
-	if( fields == 0 || (fields & Token::W) )
+	if( !vuUpperMoveWithWEnabled() && ( fields == 0 || (fields & Token::W) ) )
 		return false;
 
 	const std::list<Token::Argument>& args = token.arguments();
@@ -580,6 +580,7 @@ namespace
 	bool g_emitDelayFillers = false;
 	bool g_branchInterlock = false;
 	bool g_loopLivenessAlways = false;
+	bool g_upperMoveWithW = false;
 	bool g_branchBubbleOnDependency = false;
 }
 
@@ -685,6 +686,21 @@ void setVuLoopLivenessAlwaysEnabled( bool enabled )
 bool vuLoopLivenessAlwaysEnabled()
 {
 	return g_loopLivenessAlways;
+}
+
+// A move covering w, and a move with no field suffix at all (fields() == 0, which means
+// all four), may be emitted as `max dst,src,src` in the UPPER pipe. MAX of a value with
+// itself is that value on every component, and SCE's own output does this 25 times across
+// the engine's five clip programs. Off by default: upstream refuses these deliberately and
+// has a test that says so.
+void setVuUpperMoveWithWEnabled( bool enabled )
+{
+	g_upperMoveWithW = enabled;
+}
+
+bool vuUpperMoveWithWEnabled()
+{
+	return g_upperMoveWithW;
 }
 
 void setVuBranchInterlockEnabled( bool enabled )

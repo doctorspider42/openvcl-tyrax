@@ -62,6 +62,7 @@ public:
 	bool emitDelayFillers() const;
 	bool branchInterlock() const;
 	bool loopLivenessAlways() const;
+	bool upperMoveWithW() const;
 	bool branchBubbleOnDependency() const;
 	bool genericSoftwarePipelining() const;
 	bool strictScheduleSlots() const;
@@ -143,6 +144,7 @@ private:
 		EMIT_DELAY_FILLERS,
 		BRANCH_INTERLOCK,
 		LOOP_LIVENESS_ALWAYS,
+		UPPER_MOVE_WITH_W,
 		BRANCH_BUBBLE_ON_DEPENDENCY,
 		DISABLE_KNOWN_LOOP_OPTIMIZATIONS,
 		ENABLE_GENERIC_SOFTWARE_PIPELINING,
@@ -205,6 +207,7 @@ private:
 	bool m_emitDelayFillers;
 	bool m_branchInterlock;
 	bool m_loopLivenessAlways;
+	bool m_upperMoveWithW;
 	bool m_branchBubbleOnDependency;
 	bool m_genericSoftwarePipelining;
 	bool m_strictScheduleSlots;
