@@ -65,6 +65,7 @@ public:
 	bool upperMoveWithW() const;
 	bool showPairMisses() const;
 	bool pairBestOfTwo() const;
+	bool pairBestOfMany() const;
 	bool branchBubbleOnDependency() const;
 	bool genericSoftwarePipelining() const;
 	bool strictScheduleSlots() const;
@@ -149,6 +150,7 @@ private:
 		UPPER_MOVE_WITH_W,
 		SHOW_PAIR_MISSES,
 		PAIR_BEST_OF_TWO,
+		PAIR_BEST_OF_MANY,
 		BRANCH_BUBBLE_ON_DEPENDENCY,
 		DISABLE_KNOWN_LOOP_OPTIMIZATIONS,
 		ENABLE_GENERIC_SOFTWARE_PIPELINING,
@@ -214,6 +216,7 @@ private:
 	bool m_upperMoveWithW;
 	bool m_showPairMisses;
 	bool m_pairBestOfTwo;
+	bool m_pairBestOfMany;
 	bool m_branchBubbleOnDependency;
 	bool m_genericSoftwarePipelining;
 	bool m_strictScheduleSlots;

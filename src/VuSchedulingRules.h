@@ -119,6 +119,8 @@ void setVuShowPairMissesEnabled( bool enabled );
 bool vuShowPairMissesEnabled();
 void setVuPairBestOfTwoEnabled( bool enabled );
 bool vuPairBestOfTwoEnabled();
+void setVuPairBestOfManyEnabled( bool enabled );
+bool vuPairBestOfManyEnabled();
 bool vuLoopLivenessAlwaysEnabled();
 
 void setVuBranchInterlockEnabled( bool enabled );

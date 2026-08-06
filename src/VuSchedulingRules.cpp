@@ -583,6 +583,7 @@ namespace
 	bool g_upperMoveWithW = false;
 	bool g_showPairMisses = false;
 	bool g_pairBestOfTwo = false;
+	bool g_pairBestOfMany = false;
 	bool g_branchBubbleOnDependency = false;
 }
 
@@ -727,6 +728,20 @@ void setVuPairBestOfTwoEnabled( bool enabled )
 bool vuPairBestOfTwoEnabled()
 {
 	return g_pairBestOfTwo;
+}
+
+// --pair-best-of-many: the same trade as --pair-best-of-two over a table of ready-list
+// heuristics instead of two, compared on emitted words rather than on issue-slot count.
+// Off by default for the same reason, and it supersedes --pair-best-of-two when both are
+// given, the table's first two entries being exactly that pair.
+void setVuPairBestOfManyEnabled( bool enabled )
+{
+	g_pairBestOfMany = enabled;
+}
+
+bool vuPairBestOfManyEnabled()
+{
+	return g_pairBestOfMany;
 }
 
 void setVuBranchInterlockEnabled( bool enabled )

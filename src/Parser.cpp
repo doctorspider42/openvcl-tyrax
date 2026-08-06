@@ -2063,6 +2063,7 @@ bool Parser::tokenize()
 	setVuUpperMoveWithWEnabled( m_cmdLine.upperMoveWithW() );
 	setVuShowPairMissesEnabled( m_cmdLine.showPairMisses() );
 	setVuPairBestOfTwoEnabled( m_cmdLine.pairBestOfTwo() );
+	setVuPairBestOfManyEnabled( m_cmdLine.pairBestOfMany() );
 	setVuBranchBubbleOnDependencyEnabled( m_cmdLine.branchBubbleOnDependency() );
 
 	for( std::list<Line>::const_iterator i = m_lines.begin(); i != m_lines.end(); i++ )

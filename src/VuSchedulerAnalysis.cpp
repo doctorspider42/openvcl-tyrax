@@ -130,13 +130,42 @@ namespace
 		return VU_BASIC_BLOCK_TERMINATOR_NONE;
 	}
 
+	// One point in the space of ready-list heuristics. The default values are the
+	// only behaviour openvcl had before --pair-best-of-many; the alternatives exist
+	// so that several complete schedules can be tried per segment and the shortest
+	// kept, which is why a variant can never make the output longer.
+	struct VuReadySegmentStrategy
+	{
+		VuReadySegmentStrategy()
+		{
+			preferUnblockingWhenUnpaired = false;
+			priorityWeight = 20;
+			pipeAlternationBonus = 100;
+			oppositePipeUnblockBonus = 0;
+			longLatencyProducerBonus = 500;
+			latencyLoadBonus = 300;
+			partnerPrefersWorst = false;
+		}
+
+		bool preferUnblockingWhenUnpaired;
+		int priorityWeight;
+		int pipeAlternationBonus;
+		int oppositePipeUnblockBonus;
+		int longLatencyProducerBonus;
+		int latencyLoadBonus;
+		// Fill the row with the least valuable legal partner rather than the best one,
+		// leaving the valuable one to be a primary on a row of its own.
+		bool partnerPrefersWorst;
+	};
+
 	int readyCandidateScore( unsigned int candidate,
 	                         bool haveLastPipe,
 	                         bool lastWasLower,
 	                         const VuBasicBlock& block,
 	                         const std::vector<unsigned int>& priority,
 	                         const VuLatencyTracker& latencyTracker,
-	                         unsigned int currentCycle )
+	                         unsigned int currentCycle,
+	                         const VuReadySegmentStrategy& strategy )
 	{
 		int score = static_cast<int>( candidate );
 		const int delay =
@@ -144,17 +173,45 @@ namespace
 		score += delay * 1000;
 
 		if( isVuLongLatencyProducer( *block.tokens[candidate] ) )
-			score -= 500;
+			score -= strategy.longLatencyProducerBonus;
 		else if( isVuLatencyLoad( *block.tokens[candidate] ) )
-			score -= 300;
+			score -= strategy.latencyLoadBonus;
 
 		if( haveLastPipe && isVuLowerPipe( *block.tokens[candidate] ) != lastWasLower )
-			score -= 100;
+			score -= strategy.pipeAlternationBonus;
 
 		if( delay == 0 && candidate < priority.size() )
-			score -= static_cast<int>( priority[candidate] * 20 );
+			score -= static_cast<int>( priority[candidate] ) * strategy.priorityWeight;
 
 		return score;
+	}
+
+	// Does scheduling `candidate` now hand the OTHER pipe something to issue? The
+	// dominant reason a row goes out half empty in the env/matcap programs is
+	// samePipe - every ready instruction wants the slot already taken (313 of 484
+	// single-slot rows in stapip_clip_tce, against 201 of 502 in stapip_clip_c,
+	// where notReady dominates instead). samePipe cannot be fixed by picking a
+	// different partner at that cycle: there is none. It can only be fixed by
+	// making opposite-pipe work ready earlier, which is what this rewards.
+	bool unblocksOppositePipeSuccessor( unsigned int candidate,
+	                                    const VuBasicBlock& block,
+	                                    const std::vector<unsigned int>& incoming,
+	                                    const std::vector<bool>& emitted,
+	                                    const std::vector< std::vector<unsigned int> >& outgoing )
+	{
+		const bool candidateIsLower = isVuLowerPipe( *block.tokens[candidate] );
+		for( std::vector<unsigned int>::const_iterator edge = outgoing[candidate].begin();
+		     edge != outgoing[candidate].end();
+		     ++edge )
+		{
+			if( *edge >= block.tokens.size() || emitted[*edge] )
+				continue;
+			if( incoming[*edge] != 1 )
+				continue;      // candidate is not its last blocker
+			if( isVuLowerPipe( *block.tokens[*edge] ) != candidateIsLower )
+				return true;
+		}
+		return false;
 	}
 
 	std::vector<unsigned int> buildDependencyPriorities( const VuBasicBlock& block,
@@ -214,7 +271,8 @@ namespace
 	                                     const std::vector<unsigned int>& priority,
 	                                     const VuLatencyTracker& latencyTracker,
 	                                     unsigned int ignoredImplicitWawResources,
-	                                     unsigned int currentCycle )
+	                                     unsigned int currentCycle,
+	                                     const VuReadySegmentStrategy& strategy )
 	{
 		unsigned int best = static_cast<unsigned int>( block.tokens.size() );
 		int bestScore = 0;
@@ -250,8 +308,10 @@ namespace
 			                                       block,
 			                                       priority,
 			                                       latencyTracker,
-			                                       currentCycle );
-			if( best == block.tokens.size() || score < bestScore )
+			                                       currentCycle,
+			                                       strategy );
+			const bool better = strategy.partnerPrefersWorst ? score > bestScore : score < bestScore;
+			if( best == block.tokens.size() || better )
 			{
 				best = i;
 				bestScore = score;
@@ -311,8 +371,13 @@ namespace
 				++latency;
 		}
 
+		// `starved` is the pipe that had nothing to offer: the opposite of the primary's
+		// own. Which one it is decides where to look - a samePipe miss with an upper
+		// primary wants more lower-pipe work ready, and the other way round.
 		std::cerr << "[pairmiss] blk" << block.firstTokenIndex << " "
 		          << lowerVuTokenName( *block.tokens[primary] )
+		          << " primary=" << ( primaryIsLower ? "lower" : "upper" )
+		          << " starved=" << ( primaryIsLower ? "upper" : "lower" )
 		          << " notReady=" << notReady
 		          << " samePipe=" << samePipe
 		          << " resource=" << resource
@@ -659,6 +724,7 @@ namespace
 	                            const VuLatencyTracker& latencyTracker,
 	                            unsigned int ignoredImplicitWawResources,
 	                            unsigned int currentCycle,
+	                            const VuReadySegmentStrategy& strategy,
 	                            unsigned int& waitToken,
 	                            unsigned int& upperToken,
 	                            VuScheduledPaddingKind& paddingKind )
@@ -705,7 +771,8 @@ namespace
 				                                       block,
 				                                       priority,
 				                                       latencyTracker,
-				                                       currentCycle );
+				                                       currentCycle,
+				                                       strategy );
 				if( upperToken == block.tokens.size() || score < bestScore )
 				{
 					waitToken = wait;
@@ -724,7 +791,8 @@ namespace
 	                                                                  VuLatencyTracker& latencyTracker,
 	                                                                  unsigned int blockStartCycle,
 	                                                                  unsigned int& currentCycle,
-	                                                                  bool preferUnblockingWhenUnpaired = false )
+	                                                                  const VuReadySegmentStrategy& strategy =
+	                                                                      VuReadySegmentStrategy() )
 	{
 		std::vector<VuScheduledIssueSlot> slots;
 		if( segment.size() < 2 )
@@ -782,6 +850,7 @@ namespace
 			                           latencyTracker,
 			                           ignoredImplicitWawResources,
 			                           currentCycle,
+			                           strategy,
 			                           waitToken,
 			                           waitUpper,
 			                           waitPaddingKind ) )
@@ -810,13 +879,17 @@ namespace
 				if( emitted[i] || incoming[i] != 0 )
 					continue;
 
-				const int score = readyCandidateScore( i,
-				                                       haveLastPipe,
-				                                       lastWasLower,
-				                                       block,
-				                                       priority,
-				                                       latencyTracker,
-				                                       currentCycle );
+				int score = readyCandidateScore( i,
+				                                 haveLastPipe,
+				                                 lastWasLower,
+				                                 block,
+				                                 priority,
+				                                 latencyTracker,
+				                                 currentCycle,
+				                                 strategy );
+				if( strategy.oppositePipeUnblockBonus != 0
+				    && unblocksOppositePipeSuccessor( i, block, incoming, emitted, outgoing ) )
+					score -= strategy.oppositePipeUnblockBonus;
 				if( best == block.tokens.size() || score < bestScore )
 				{
 					best = i;
@@ -845,7 +918,8 @@ namespace
 			                                                     priority,
 			                                                     latencyTracker,
 			                                                     ignoredImplicitWawResources,
-			                                                     currentCycle );
+			                                                     currentCycle,
+			                                                     strategy );
 			if( partner >= block.tokens.size() && vuShowPairMissesEnabled() )
 				reportPairMiss( best, block, incoming, emitted, latencyTracker,
 				                ignoredImplicitWawResources, currentCycle );
@@ -859,7 +933,7 @@ namespace
 			//
 			// Whether it pays depends on the segment, so the caller tries both and keeps
 			// the shorter schedule rather than anyone guessing a scope.
-			if( preferUnblockingWhenUnpaired && partner >= block.tokens.size() )
+			if( strategy.preferUnblockingWhenUnpaired && partner >= block.tokens.size() )
 			{
 				unsigned int rechosen = best;
 				int rechosenScore = 0;
@@ -885,7 +959,7 @@ namespace
 						continue;
 					const int score = readyCandidateScore( i, haveLastPipe, lastWasLower,
 					                                       block, priority, latencyTracker,
-					                                       currentCycle );
+					                                       currentCycle, strategy );
 					if( !have || score < rechosenScore )
 					{
 						have = true;
@@ -1030,6 +1104,136 @@ namespace
 		return liveness;
 	}
 
+	// What this schedule will actually cost in micro memory. --pair-best-of-two
+	// compared std::vector::size(), which counts a multi-cycle NOP padding slot as
+	// one; the code generator writes min(emitCycleCount,cycleCount) words for it and
+	// one word for every other slot, waitq/waitp included - emitUpperWithWait folds
+	// the wait into the same row.
+	unsigned int issueSlotEmittedWordCount( const std::vector<VuScheduledIssueSlot>& slots )
+	{
+		unsigned int words = 0;
+		for( std::vector<VuScheduledIssueSlot>::const_iterator i = slots.begin(); i != slots.end(); ++i )
+		{
+			if( !i->padding )
+			{
+				++words;
+				continue;
+			}
+			const unsigned int cycles = i->cycleCount > 0 ? i->cycleCount : 1;
+			words += i->emitCycleCount < cycles ? i->emitCycleCount : cycles;
+		}
+		return words;
+	}
+
+	// The strategies --pair-best-of-many tries. Order is not significant except that
+	// ties keep the earliest, so index 0 must be the plain heuristic and index 1 the
+	// one --pair-best-of-two already had: with an empty win the output then matches
+	// --pair-best-of-two rather than drifting for no gain.
+	const std::vector<VuReadySegmentStrategy>& readySegmentStrategies()
+	{
+		static std::vector<VuReadySegmentStrategy> strategies;
+		if( !strategies.empty() )
+			return strategies;
+
+		// These five are what survived a 26-entry sweep of the four knobs over the ten
+		// resident programs: every other point in it lost or tied on every segment, so
+		// carrying it would only cost compile time. Trimming to the winners is exact,
+		// not an approximation - the minimum over a subset that still contains every
+		// segment's argmin is the same minimum.
+		VuReadySegmentStrategy plain;
+		strategies.push_back( plain );
+
+		VuReadySegmentStrategy unblocking;
+		unblocking.preferUnblockingWhenUnpaired = true;
+		strategies.push_back( unblocking );
+
+		// Critical-path height at 1.5x and 3x source order. Both directions were swept
+		// (6, 10, 40, 100, 200, 400); only these two ever come out ahead.
+		VuReadySegmentStrategy weighted;
+		weighted.priorityWeight = 30;
+		strategies.push_back( weighted );
+
+		VuReadySegmentStrategy weightedUnblocking;
+		weightedUnblocking.priorityWeight = 60;
+		weightedUnblocking.preferUnblockingWhenUnpaired = true;
+		strategies.push_back( weightedUnblocking );
+
+		// Stop hoisting divides and rsqrts ahead of everything else. Worth two words on
+		// stapip_cull_td, where starting the divide early strands the rest of the row.
+		VuReadySegmentStrategy noLongLatency;
+		noLongLatency.longLatencyProducerBonus = 0;
+		strategies.push_back( noLongLatency );
+
+		// Spend the row's free slot on the LEAST valuable legal partner and leave the
+		// valuable one to be a primary. Worth three words on stapip_cull_tce and one
+		// each on cull_c and cull_tc - the programs where the ready set is a long run
+		// of one pipe and a partner, once spent, is not there for the next row.
+		VuReadySegmentStrategy cheapPartner;
+		cheapPartner.partnerPrefersWorst = true;
+		strategies.push_back( cheapPartner );
+
+		VuReadySegmentStrategy cheapPartnerUnblocking = cheapPartner;
+		cheapPartnerUnblocking.preferUnblockingWhenUnpaired = true;
+		strategies.push_back( cheapPartnerUnblocking );
+
+		return strategies;
+	}
+
+	// Every strategy scheduled on a copy of the latency tracker, then the shortest
+	// re-run for real. A variant can only ever be discarded, so adding one cannot
+	// lengthen the output - it costs compile time and nothing else.
+	void appendBestOfManyReadySegmentSlots( const std::vector<const Token*>& segment,
+	                                       std::vector<VuScheduledIssueSlot>& slots,
+	                                       unsigned int ignoredImplicitWawResources,
+	                                       VuLatencyTracker& latencyTracker,
+	                                       unsigned int blockStartCycle,
+	                                       unsigned int& currentCycle )
+	{
+		const std::vector<VuReadySegmentStrategy>& strategies = readySegmentStrategies();
+		unsigned int bestIndex = 0;
+		unsigned int bestWords = 0;
+		unsigned int plainWords = 0;
+
+		for( unsigned int i = 0; i < strategies.size(); ++i )
+		{
+			VuLatencyTracker trialTracker = latencyTracker;
+			unsigned int trialCycle = currentCycle;
+			const std::vector<VuScheduledIssueSlot> trial =
+				scheduleReadySegmentIssueSlots( segment,
+				                                ignoredImplicitWawResources,
+				                                trialTracker,
+				                                blockStartCycle,
+				                                trialCycle,
+				                                strategies[i] );
+			const unsigned int words = issueSlotEmittedWordCount( trial );
+			if( i == 0 )
+				plainWords = words;
+			if( i == 0 || words < bestWords )
+			{
+				bestWords = words;
+				bestIndex = i;
+			}
+		}
+
+		// Attribution: which entry in the table earned this segment, and by how much
+		// against the plain heuristic. A table entry that never appears here is dead
+		// weight - it only costs compile time.
+		if( vuShowPairMissesEnabled() && bestIndex != 0 )
+			std::cerr << "[pairwin] strategy=" << bestIndex
+			          << " words=" << bestWords
+			          << " plain=" << plainWords
+			          << " saved=" << ( plainWords - bestWords ) << std::endl;
+
+		std::vector<VuScheduledIssueSlot> segmentSlots =
+			scheduleReadySegmentIssueSlots( segment,
+			                                ignoredImplicitWawResources,
+			                                latencyTracker,
+			                                blockStartCycle,
+			                                currentCycle,
+			                                strategies[bestIndex] );
+		slots.insert( slots.end(), segmentSlots.begin(), segmentSlots.end() );
+	}
+
 	void appendReadyScheduledSegmentSlots( const std::vector<const Token*>& segment,
 	                                       std::vector<VuScheduledIssueSlot>& slots,
 	                                       unsigned int ignoredImplicitWawResources,
@@ -1037,6 +1241,17 @@ namespace
 	                                       unsigned int blockStartCycle,
 	                                       unsigned int& currentCycle )
 	{
+		if( vuPairBestOfManyEnabled() )
+		{
+			appendBestOfManyReadySegmentSlots( segment,
+			                                  slots,
+			                                  ignoredImplicitWawResources,
+			                                  latencyTracker,
+			                                  blockStartCycle,
+			                                  currentCycle );
+			return;
+		}
+
 		if( !vuPairBestOfTwoEnabled() )
 		{
 			std::vector<VuScheduledIssueSlot> only =
@@ -1052,6 +1267,7 @@ namespace
 		// Two trial schedules on copies, then the winner for real. Fewer issue slots is
 		// fewer emitted rows, and the two strategies differ only in what fills a row that
 		// was going out half empty either way.
+		VuReadySegmentStrategy plainStrategy;
 		VuLatencyTracker plainTracker = latencyTracker;
 		unsigned int plainCycle = currentCycle;
 		const std::vector<VuScheduledIssueSlot> plain =
@@ -1060,8 +1276,10 @@ namespace
 			                                plainTracker,
 			                                blockStartCycle,
 			                                plainCycle,
-			                                false );
+			                                plainStrategy );
 
+		VuReadySegmentStrategy unblockStrategy;
+		unblockStrategy.preferUnblockingWhenUnpaired = true;
 		VuLatencyTracker unblockTracker = latencyTracker;
 		unsigned int unblockCycle = currentCycle;
 		const std::vector<VuScheduledIssueSlot> unblocking =
@@ -1070,15 +1288,17 @@ namespace
 			                                unblockTracker,
 			                                blockStartCycle,
 			                                unblockCycle,
-			                                true );
+			                                unblockStrategy );
 
+		VuReadySegmentStrategy winner;
+		winner.preferUnblockingWhenUnpaired = unblocking.size() < plain.size();
 		std::vector<VuScheduledIssueSlot> segmentSlots =
 			scheduleReadySegmentIssueSlots( segment,
 			                                ignoredImplicitWawResources,
 			                                latencyTracker,
 			                                blockStartCycle,
 			                                currentCycle,
-			                                unblocking.size() < plain.size() );
+			                                winner );
 		slots.insert( slots.end(), segmentSlots.begin(), segmentSlots.end() );
 	}
 

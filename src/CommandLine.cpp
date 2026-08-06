@@ -84,6 +84,7 @@ CommandLine::CommandLine()
 	m_upperMoveWithW = false;
 	m_showPairMisses = false;
 	m_pairBestOfTwo = false;
+	m_pairBestOfMany = false;
 	m_branchBubbleOnDependency = false;
 	m_genericSoftwarePipelining = true;
 	m_strictScheduleSlots = false;
@@ -144,6 +145,7 @@ CommandLine::CommandLine()
 	m_options.push_back(Option(0,"upper-move-with-w",UPPER_MOVE_WITH_W,false));
 	m_options.push_back(Option(0,"show-pair-misses",SHOW_PAIR_MISSES,false));
 	m_options.push_back(Option(0,"pair-best-of-two",PAIR_BEST_OF_TWO,false));
+	m_options.push_back(Option(0,"pair-best-of-many",PAIR_BEST_OF_MANY,false));
 	m_options.push_back(Option(0,"branch-bubble-on-dependency",BRANCH_BUBBLE_ON_DEPENDENCY,false));
 	m_options.push_back(Option('\0',"disable-known-loop-optimizations",DISABLE_KNOWN_LOOP_OPTIMIZATIONS,false));
 	m_options.push_back(Option('\0',"enable-generic-software-pipelining",ENABLE_GENERIC_SOFTWARE_PIPELINING,false));
@@ -268,6 +270,7 @@ bool CommandLine::parse( int argc, char* argv[] )
 				case UPPER_MOVE_WITH_W: m_upperMoveWithW = true; break;
 				case SHOW_PAIR_MISSES: m_showPairMisses = true; break;
 				case PAIR_BEST_OF_TWO: m_pairBestOfTwo = true; break;
+				case PAIR_BEST_OF_MANY: m_pairBestOfMany = true; break;
 				case BRANCH_BUBBLE_ON_DEPENDENCY: m_branchBubbleOnDependency = true; break;
 				case DISABLE_KNOWN_LOOP_OPTIMIZATIONS: m_knownLoopOptimizations = false; break;
 				case ENABLE_GENERIC_SOFTWARE_PIPELINING: m_genericSoftwarePipelining = true; break;
