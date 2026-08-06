@@ -1676,6 +1676,25 @@ unsigned int CodeGenerator::emittedRowsSinceClipWrite() const
 	return 0xFFFFu;
 }
 
+bool CodeGenerator::clipReadIsPositional( const Token& token ) const
+{
+	// A flag reader carries the mask it tests as an immediate. Full-window masks
+	// (all 24 bits, or the 18 that three vertices occupy) do not care which position
+	// the bits sit in; anything narrower does.
+	for( std::list<Token::Argument>::const_iterator a = token.arguments().begin();
+	     a != token.arguments().end(); ++a )
+	{
+		if( a->type() != Token::Argument::IMMEDIATE )
+			continue;
+		const std::string& text = a->immediate();
+		if( text.empty() )
+			continue;
+		const unsigned long mask = std::strtoul( text.c_str(), NULL, 0 );
+		return mask != 0 && mask < 0x3FFFFul;
+	}
+	return true;      // no mask to judge by: assume it matters
+}
+
 void CodeGenerator::padForClipFlagWindow( const Token& a, const Token* b )
 {
 	const unsigned int latency = vuClipFlagVisibilityLatency();
@@ -1693,7 +1712,17 @@ void CodeGenerator::padForClipFlagWindow( const Token& a, const Token* b )
 		if( !buildVuTokenResourceAccess( *pair[k], access ) )
 			continue;
 		if( access.implicitReads & VU_RESOURCE_CLIP )
-			readsClip = true;
+		{
+			// Only a POSITIONAL read has to wait. The window holds six bits per CLIP,
+			// so a mask that covers the whole thing ("is anything outside", 0x3FFFF
+			// for three vertices) gets the same answer whichever position the bits
+			// are in - and SCE reads those adjacent to their CLIP, five times over
+			// these programs, while never putting a positional read below three rows.
+			// Padding the full-window ones is pure loss: it costs this engine's five
+			// cull programs 22 instructions and changes nothing they compute.
+			if( clipReadIsPositional( *pair[k] ) )
+				readsClip = true;
+		}
 		if( access.implicitWrites & VU_RESOURCE_CLIP )
 			writesClip = true;
 	}

@@ -575,6 +575,7 @@ namespace
 	bool g_fmacInterlock = false;
 	unsigned int g_flagVisibilityLatency = 4;
 	unsigned int g_clipFlagVisibilityLatency = 4;
+	unsigned int g_clipFlagSchedulingLatency = 4;
 	unsigned int g_integerLoadReadyCycles = 0;
 	bool g_emitDelayFillers = false;
 	bool g_branchInterlock = false;
@@ -627,6 +628,23 @@ void setVuClipFlagVisibilityLatency( unsigned int cycles )
 unsigned int vuClipFlagVisibilityLatency()
 {
 	return g_clipFlagVisibilityLatency;
+}
+
+// The scheduler and the emitter need different numbers for the same wait. The emitter
+// enforces the hardware minimum in EMITTED ROWS. The scheduler works in cycles, where
+// an interlocked wait is free, so giving it the bare minimum leaves it no reason to
+// move work into the gap - and every row the emitter then has to pad is a wasted
+// instruction. A larger scheduling figure asks it to spread the flag reader further
+// out, which it can only do by filling the space with work that was going to be
+// emitted anyway.
+void setVuClipFlagSchedulingLatency( unsigned int cycles )
+{
+	g_clipFlagSchedulingLatency = cycles > 0 ? cycles : 1;
+}
+
+unsigned int vuClipFlagSchedulingLatency()
+{
+	return g_clipFlagSchedulingLatency;
 }
 
 void setVuIntegerLoadReadyCycles( unsigned int cycles )

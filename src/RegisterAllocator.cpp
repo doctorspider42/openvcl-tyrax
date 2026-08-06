@@ -924,11 +924,18 @@ bool RegisterAllocator::loopTargetHasLoopDirective( std::list<Token>::iterator t
 
 void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsigned int loopStart, unsigned int loopEnd )
 {
-	// Which float aliases does this loop body touch, and is the FIRST touch a read?
+	// Which aliases does this loop body touch, and is the FIRST touch a read?
 	// Only a read-first alias is live across the back edge - the next iteration
 	// depends on what the previous one left in it. An alias written before it is read
 	// inside the body is a temporary and its own range already covers it; stretching
 	// those over the whole loop is what runs the allocator out of registers.
+	//
+	// Integers are collected on the same terms as floats. Tying their carried writes is
+	// not enough on its own: an integer whose live range stops at its last use inside
+	// the body has its register handed to another name for the rest of the loop, so the
+	// next iteration reads whatever that name left. The range has to cover the back edge
+	// too - the file is only 16 registers, so this is where a program that is already
+	// tight will fail loudly instead of quietly computing the wrong thing.
 	std::set<Alias*> aliases;
 	std::set<Alias*> liveInAliases;
 	std::set<Alias*> touched;
@@ -944,8 +951,6 @@ void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsi
 			if( a->content() != Token::Argument::ALIAS || !a->dependency() || !a->dependency()->alias() )
 				continue;
 			Alias* alias = a->dependency()->alias();
-			if( alias->type() != Alias::FLOAT )
-				continue;
 			aliases.insert( alias );
 			tokenAliases.insert( alias );
 			if( !(a->flags() & Token::Argument::WRITE) )
@@ -967,20 +972,30 @@ void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsi
 		aliases = liveInAliases;
 
 	unsigned int availableFloats = 0;
+	unsigned int availableInts = 0;
 	for( unsigned int i = 0; i < 32; ++i )
 	{
 		if( m_floats[i].available() )
 			++availableFloats;
 	}
+	for( unsigned int i = 0; i < 16; ++i )
+	{
+		if( m_integers[i].available() )
+			++availableInts;
+	}
 
-	std::set<Alias*> overlappingAliases;
+	std::set<Alias*> overlappingFloats;
+	std::set<Alias*> overlappingInts;
 	for( AliasMap::iterator i = m_aliases.begin(); i != m_aliases.end(); ++i )
 	{
 		Alias* alias = i->first;
-		if( alias->type() != Alias::FLOAT )
+		if( aliases.find( alias ) == aliases.end()
+		    && !alias->hasRangeOverlapping( loopStart, loopEnd ) )
 			continue;
-		if( aliases.find( alias ) != aliases.end() || alias->hasRangeOverlapping( loopStart, loopEnd ) )
-			overlappingAliases.insert( alias );
+		if( alias->type() == Alias::FLOAT )
+			overlappingFloats.insert( alias );
+		else
+			overlappingInts.insert( alias );
 	}
 
 	// Skipping the extension is not a licence to emit wrong code: a value live
@@ -988,7 +1003,8 @@ void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsi
 	// to another name. --loop-liveness-always keeps the extension and lets
 	// allocation fail loudly instead.
 	if( !vuLoopLivenessAlwaysEnabled()
-	    && overlappingAliases.size() > availableFloats )
+	    && ( overlappingFloats.size() > availableFloats
+	         || overlappingInts.size() > availableInts ) )
 		return;
 
 	for( std::set<Alias*>::iterator a = aliases.begin(); a != aliases.end(); ++a )

@@ -77,6 +77,8 @@ void setVuFlagVisibilityLatency( unsigned int cycles );
 unsigned int vuFlagVisibilityLatency();
 void setVuClipFlagVisibilityLatency( unsigned int cycles );
 unsigned int vuClipFlagVisibilityLatency();
+void setVuClipFlagSchedulingLatency( unsigned int cycles );
+unsigned int vuClipFlagSchedulingLatency();
 
 // Cycles after which a memory load's destination may be read, or 0 to keep the
 // instruction table's latency+1. --sce-latencies sets 3 (see VuLatencyTracker).
