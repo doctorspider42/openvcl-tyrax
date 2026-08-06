@@ -2066,6 +2066,7 @@ bool Parser::tokenize()
 	setVuSinkLoadsEnabled( m_cmdLine.sinkLoads() );
 	setVuSinkLoadsAcrossStoresEnabled( m_cmdLine.sinkLoadsAcrossStores() );
 	setVuSinkLoadsIntoLoopsEnabled( m_cmdLine.sinkLoadsIntoLoops() );
+	setVuSinkLoadsPastBranchesEnabled( m_cmdLine.sinkLoadsPastBranches() );
 	setVuShowPairMissesEnabled( m_cmdLine.showPairMisses() );
 	setVuPairBestOfTwoEnabled( m_cmdLine.pairBestOfTwo() );
 	setVuPairBestOfManyEnabled( m_cmdLine.pairBestOfMany() );
@@ -2091,12 +2092,65 @@ bool Parser::tokenize()
 
 bool Parser::allocateRegisters()
 {
+	// --sink-loads-past-branches is not applied speculatively. Carrying a load
+	// over a branch reorders the block it lands in, and the scheduler then does
+	// something slightly different with the whole program - measured over the 45
+	// generated TyraX microprograms it moved 26 of them and was worth two words
+	// in either direction, three of them a row longer and one a row shorter, in
+	// programs that had registers to spare and gained nothing for it. So the
+	// allocation is run first exactly as it would run with the flag off, and the
+	// flag only gets its turn when that runs out of registers. Same bargain the
+	// --coalesce-float-writes retry inside the allocator makes: the flag can only
+	// ever add programs that compile, never change one that already did.
+	const bool retryPastBranches = m_cmdLine.sinkLoads() && m_cmdLine.sinkLoadsPastBranches();
+
+	std::list<Token> pristine;
+	if( retryPastBranches )
+	{
+		// process() reorders the list, renumbers it and hangs dependencies off
+		// its arguments, so the second attempt needs the tokenizer's own output
+		// back, not the first attempt's leftovers. Copied an element at a time:
+		// a Token holds a reference to the Line it was parsed from and so has no
+		// assignment operator, only a copy constructor. The Lines are the
+		// parser's own and outlive both attempts.
+		const std::list<Token>& current = m_tokenizer.tokens();
+		pristine.insert( pristine.end(), current.begin(), current.end() );
+		setVuSinkLoadsPastBranchesEnabled( false );
+		Error::SetSuppressed( true );
+	}
+
 	m_registerAllocator.setAvailableFloats( m_tokenizer.availableFloats() );
 	m_registerAllocator.setAvailableIntegers( m_tokenizer.availableIntegers() );
 	m_registerAllocator.setDynamicThreshold( m_cmdLine.threshold() );
 	m_registerAllocator.setShowRegisterInfo( m_cmdLine.showRegisterInfo() );
 
-	if( !m_registerAllocator.process( m_tokenizer.tokens() ) )
+	bool allocated = m_registerAllocator.process( m_tokenizer.tokens() );
+
+	if( retryPastBranches )
+	{
+		Error::SetSuppressed( false );
+
+		if( !allocated )
+		{
+			if( m_cmdLine.showRegisterInfo() )
+				std::cerr << "Retrying allocation with --sink-loads-past-branches" << std::endl;
+
+			m_tokenizer.tokens().clear();
+			m_tokenizer.tokens().insert( m_tokenizer.tokens().end(),
+			                             pristine.begin(), pristine.end() );
+			m_registerAllocator.reset();
+			setVuSinkLoadsPastBranchesEnabled( true );
+
+			m_registerAllocator.setAvailableFloats( m_tokenizer.availableFloats() );
+			m_registerAllocator.setAvailableIntegers( m_tokenizer.availableIntegers() );
+			m_registerAllocator.setDynamicThreshold( m_cmdLine.threshold() );
+			m_registerAllocator.setShowRegisterInfo( m_cmdLine.showRegisterInfo() );
+
+			allocated = m_registerAllocator.process( m_tokenizer.tokens() );
+		}
+	}
+
+	if( !allocated )
 		return false;
 
 	setState( GENERATE_CODE );

@@ -30,6 +30,15 @@ public:
 	static bool HasErrors();
 	static void ResetErrorCount();
 
+	// Silence Display() and stop it counting, for a pass whose failure is a
+	// decision rather than a diagnosis.  Parser::allocateRegisters() allocates
+	// once speculatively before retrying with --sink-loads-past-branches, and
+	// the speculative attempt running out of registers is the normal way that
+	// works, not something to print.  Any error that is NOT about running out
+	// of registers depends on the input rather than on the allocation, so the
+	// unsuppressed retry reports it just the same.
+	static void SetSuppressed( bool suppressed );
+
 private:
 
 	enum
@@ -50,6 +59,7 @@ private:
 
 	static std::list<Error> ms_errors;
 	static unsigned int ms_errorCount;
+	static bool ms_suppressed;
 };
 
 }

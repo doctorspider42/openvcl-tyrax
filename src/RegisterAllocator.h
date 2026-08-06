@@ -48,6 +48,14 @@ public:
 
 	bool process( std::list<Token>& tokens );
 
+	// Put every accumulated allocation result back to its constructed state, so
+	// the same allocator can be run a second time over a restored token list.
+	// Only Parser::allocateRegisters() needs this, for the
+	// --sink-loads-past-branches retry.  The BranchStates and Aliases the failed
+	// attempt built are dropped rather than freed, which is what the failure
+	// path already did before returning.
+	void reset();
+
 	void releaseAlias( Alias* alias );
 	Alias* obtainAlias( Alias::Type type );
 
@@ -124,6 +132,15 @@ private:
 	std::set<std::string> m_sinkLoopHeaders;
 	std::map<std::string, unsigned int> m_sinkNameWrites;
 	bool m_sinkStoreBaseUnknown;
+
+	// --sink-loads-past-branches needs one program-wide fact per label: how many
+	// branches in the whole program name it. The scan counts the ones it walks
+	// over, and the two numbers agreeing is what proves no OTHER path enters the
+	// span the load is being moved across. Counted per label rather than per
+	// position because the pass splices tokens as it goes, which invalidates
+	// indices but never the count - a load is not a branch.
+	std::map<std::string, unsigned int> m_sinkLabelBranchCount;
+	bool m_sinkIndirectBranch;
 
 	// --trim-uncarried-ranges.  Shrink a merged alias back to the extent of its
 	// own accesses when it provably dies at its last use inside one loop

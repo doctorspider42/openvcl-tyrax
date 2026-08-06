@@ -106,11 +106,31 @@ Useful options:
 | `--dump-instruction-info-json` | print the VU instruction metadata table as JSON |
 | `--dump-schedule-info` | print generic ready-scheduler issue slots |
 | `--dump-schedule-info-json` | print generic ready-scheduler issue slots as JSON |
+| `--schedule-flag-readers` | MAC/CLIP flag readers take part in list scheduling instead of ending the segment |
+| `--fmac-interlock` | a VF-to-VF wait costs cycles, not emitted `nop` words — the FMAC pipeline interlocks |
+| `--sce-latencies` | flag visibility 4 → 1 cycle; an integer load's result readable at issue+3 |
+| `--emit-delay-fillers` | offer the instruction scheduled before a branch as its delay-slot filler |
+| `--branch-interlock` | no padding word before a branch whose operand came from a load or a flag reader |
+| `--branch-bubble-on-dependency` | emit the pre-branch bubble only when the row above actually produces one of the branch's operands |
+| `--loop-liveness-always` | never skip extending a live range across a loop's back edge |
+| `--upper-move-with-w` | promote a full-width `move` into the upper pipe, where it can pair |
+| `--pair-best-of-two` | schedule each segment both ways and keep the shorter |
+| `--pair-best-of-many` | schedule each segment under seven ready-list heuristics and keep the shortest |
+| `--trim-uncarried-ranges` | rebuild a live range from the alias's own accesses, when the value provably dies at its last use inside one iteration |
+| `--coalesce-float-writes` | give a float write the register its own previous value already sits in, when that value is dead from the write on |
+| `--sink-loads` | move a load down the token list to just before the value it loads is first read, and re-derive the allocator's timeline from list position |
+| `--sink-loads-across-stores` | let a sinking load pass a store through a *different* base register — an aliasing assumption, and the one SCE's `vcl` makes in its own output |
+| `--sink-loads-into-loops` | let a sinking load pass one loop header, so a preamble load whose only readers are inside the batch loop stops pinning a register across the whole program |
+| `--sink-loads-past-branches` | let a sinking load cross a branch to a point every path out of its old position reaches, and only after an allocation has already run out of registers |
 | `--enable-generic-software-pipelining` | enable safe generic software-pipeline rewrites, currently the default |
 | `--disable-generic-software-pipelining` | disable generic software-pipeline rewrites for comparison/debugging |
 | `--strict-schedule-slots` | emit from the typed scheduler slot model without legacy lookahead pairing |
 
 `-M`, `-P`, and `-Z` are accepted for VCL command-line compatibility.
+
+The sixteen density and register-allocation options are additions this fork
+makes to OpenVCL, and every one of them is off by default. What each is for and
+what it measured are in [`NOTICE-TYRAX.md`](NOTICE-TYRAX.md).
 
 ## VSM Cost Analysis
 

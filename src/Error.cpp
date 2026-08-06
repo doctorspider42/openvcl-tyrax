@@ -8,6 +8,7 @@ namespace vcl
 
 std::list<Error> Error::ms_errors;
 unsigned int Error::ms_errorCount = 0;
+bool Error::ms_suppressed = false;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -157,6 +158,9 @@ std::string Error::toString() const
 
 void Error::Display( const Error& e )
 {
+	if( ms_suppressed )
+		return;
+
 	std::cerr << e.toString() << std::endl;
 	// Track non-warning errors so main() can fail the run with a non-zero
 	// exit code.  Without this, openvcl prints diagnostics and still
@@ -173,6 +177,11 @@ bool Error::HasErrors()
 void Error::ResetErrorCount()
 {
 	ms_errorCount = 0;
+}
+
+void Error::SetSuppressed( bool suppressed )
+{
+	ms_suppressed = suppressed;
 }
 
 }

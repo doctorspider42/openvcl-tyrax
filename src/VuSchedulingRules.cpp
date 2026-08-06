@@ -586,6 +586,7 @@ namespace
 	bool g_sinkLoads = false;
 	bool g_sinkLoadsAcrossStores = false;
 	bool g_sinkLoadsIntoLoops = false;
+	bool g_sinkLoadsPastBranches = false;
 	bool g_showPairMisses = false;
 	bool g_pairBestOfTwo = false;
 	bool g_pairBestOfMany = false;
@@ -759,6 +760,16 @@ void setVuSinkLoadsIntoLoopsEnabled( bool enabled )
 bool vuSinkLoadsIntoLoopsEnabled()
 {
 	return g_sinkLoadsIntoLoops;
+}
+
+void setVuSinkLoadsPastBranchesEnabled( bool enabled )
+{
+	g_sinkLoadsPastBranches = enabled;
+}
+
+bool vuSinkLoadsPastBranchesEnabled()
+{
+	return g_sinkLoadsPastBranches;
 }
 
 // Diagnostics only: report why a row went out with one slot used.

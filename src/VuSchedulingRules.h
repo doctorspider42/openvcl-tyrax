@@ -187,6 +187,32 @@ bool vuSinkLoadsAcrossStoresEnabled();
 // with --sink-loads.
 void setVuSinkLoadsIntoLoopsEnabled( bool enabled );
 bool vuSinkLoadsIntoLoopsEnabled();
+
+// --sink-loads-past-branches: let a sinking load cross a branch, landing at a
+// point every path out of the load's old position reaches. vu_script3_tce_cl is
+// the program that needs it: five GIF-tag quadwords are loaded in the preamble
+// and read only by the `sq`s that build the packet header, but a two-arm branch
+// picking the destination address sits in between, and the pass walls off at any
+// branch because the allocator has no dominance information. Landing on
+// `setDestAddr:` is correct - both arms rejoin there - and it takes the peak from
+// 33 simultaneously live float ranges to 28, against 31 registers.
+//
+// The condition is post-dominance restricted to a forward span, tested during the
+// walk itself rather than from a built CFG, which the allocator would otherwise
+// need and does not have. Two counts do it. No path may leave the span past the
+// landing point: a branch's target label has to have been walked over before the
+// load may land after it, so a jump over the current position always blocks it,
+// and a branch back to a label already walked over is refused outright. And no
+// path may enter the span past the load: a label is only transparent once every
+// branch in the WHOLE program that names it has been walked over, so a join of
+// arms that all started at the load is free while a way in from anywhere else is
+// a wall. One `jr` - a branch whose target is not a label this can read - and the
+// program is given up on, since then any label might be entered from outside.
+// Counting branches per label rather than positions is what survives the pass
+// splicing tokens as it goes: a load is never a branch, so no move it makes can
+// change a count. Only has an effect together with --sink-loads.
+void setVuSinkLoadsPastBranchesEnabled( bool enabled );
+bool vuSinkLoadsPastBranchesEnabled();
 void setVuShowPairMissesEnabled( bool enabled );
 bool vuShowPairMissesEnabled();
 void setVuPairBestOfTwoEnabled( bool enabled );

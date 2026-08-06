@@ -68,6 +68,7 @@ public:
 	bool sinkLoads() const;
 	bool sinkLoadsAcrossStores() const;
 	bool sinkLoadsIntoLoops() const;
+	bool sinkLoadsPastBranches() const;
 	bool showPairMisses() const;
 	bool pairBestOfTwo() const;
 	bool pairBestOfMany() const;
@@ -158,6 +159,7 @@ private:
 		SINK_LOADS,
 		SINK_LOADS_ACROSS_STORES,
 		SINK_LOADS_INTO_LOOPS,
+		SINK_LOADS_PAST_BRANCHES,
 		SHOW_PAIR_MISSES,
 		PAIR_BEST_OF_TWO,
 		PAIR_BEST_OF_MANY,
@@ -229,6 +231,7 @@ private:
 	bool m_sinkLoads;
 	bool m_sinkLoadsAcrossStores;
 	bool m_sinkLoadsIntoLoops;
+	bool m_sinkLoadsPastBranches;
 	bool m_showPairMisses;
 	bool m_pairBestOfTwo;
 	bool m_pairBestOfMany;

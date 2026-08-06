@@ -50,6 +50,7 @@ RegisterAllocator::RegisterAllocator()
 	m_dynamicThreshold = 16;
 	m_showRegisterInfo = false;
 	m_sinkStoreBaseUnknown = false;
+	m_sinkIndirectBranch = false;
 	m_currState = OUTSIDE;
 }
 
@@ -57,6 +58,33 @@ RegisterAllocator::RegisterAllocator()
 
 RegisterAllocator::~RegisterAllocator()
 {
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void RegisterAllocator::reset()
+{
+	m_labels.clear();
+	m_states.clear();
+	m_aliases.clear();
+	m_coalescedWrites.clear();
+	m_dynamicTracker.clear();
+	m_name.clear();
+	m_currState = OUTSIDE;
+
+	for( unsigned int i = 0; i < 32; ++i )
+		m_floats[i].setBusy( false );
+	for( unsigned int i = 0; i < 16; ++i )
+		m_integers[i].setBusy( false );
+
+	m_sinkIntegerWrites.clear();
+	m_sinkStoreOffsets.clear();
+	m_sinkStoreVagueBases.clear();
+	m_sinkLoopHeaders.clear();
+	m_sinkNameWrites.clear();
+	m_sinkLabelBranchCount.clear();
+	m_sinkStoreBaseUnknown = false;
+	m_sinkIndirectBranch = false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1673,6 +1701,30 @@ namespace
 		offset = access.memoryOffset;
 		return true;
 	}
+
+	// The label a branch names, for the one shape --sink-loads-past-branches
+	// reasons about: a single immediate target and nothing written. That is
+	// every conditional branch and a plain `b`. `bal` writes its link register
+	// and `jr` has no immediate target at all; neither is a forward edge inside
+	// a straight-line span, and both leave through the empty string.
+	std::string sinkBranchTargetLabel( const Token& token )
+	{
+		std::string target;
+		for( std::list<Token::Argument>::const_iterator a = token.arguments().begin();
+		     a != token.arguments().end(); ++a )
+		{
+			if( a->flags() & Token::Argument::WRITE )
+				return std::string();
+			if( !(a->flags() & Token::Argument::BRANCH) )
+				continue;
+			if( a->type() != Token::Argument::IMMEDIATE || a->immediate().empty() )
+				return std::string();
+			if( !target.empty() )
+				return std::string();
+			target = a->immediate();
+		}
+		return target;
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1690,12 +1742,52 @@ std::list<Token>::iterator RegisterAllocator::sinkTargetForLoad( std::list<Token
 	if( !tokenIsSinkableLoad( *load, dest, base, hasOffset, offset ) )
 		return target;
 
-	// --sink-loads-into-loops only: the position the load would stop at if a
-	// label were still a wall, kept so the whole excursion past a label can be
-	// abandoned when it turns out not to reach the value's first reader.
-	std::list<Token>::iterator beforeLabel = target;
-	bool crossedLabel = false;
+	// Where the load stood before it crossed the first label or branch, kept so
+	// the whole excursion can be abandoned when it turns out not to reach the
+	// value's first reader. Both --sink-loads-into-loops and
+	// --sink-loads-past-branches only pay off on a completed motion: one is
+	// rematerialization charged per loop iteration, the other gives up the
+	// scheduler's room inside a two-arm block, and neither buys a register back
+	// unless the load ends up in front of its reader.
+	std::list<Token>::iterator beforeExcursion = target;
+	bool tookExcursion = false;
 	bool crossedHeader = false;
+
+	// --sink-loads-past-branches. The load may be carried over a branch as long
+	// as the place it lands is reached on EVERY path out of where it started -
+	// which needs two things of the span walked over, and nothing else:
+	//
+	//   * no path out of the span skips the landing point. Every branch walked
+	//     over names a label, and the load may only land once that label has
+	//     itself been walked over; while one is outstanding there is a jump
+	//     over the current position and no legal home here. `pendingTargets`
+	//     holds the outstanding ones. A branch back to a label already walked
+	//     over is a loop and is refused outright.
+	//   * no path INTO the span skips the load. A label is only transparent
+	//     once every branch in the whole program that names it has been walked
+	//     over; then the paths joining there all came from the load. That is
+	//     what `m_sinkLabelBranchCount` is counted for.
+	//
+	// Together those are post-dominance, restricted to a forward span, which is
+	// the only shape that occurs here: the generated header block picks its
+	// destination address on one arm or the other and both arms rejoin at
+	// `setDestAddr:` before the first `sq` reads a GIF tag.
+	//
+	// A branch excursion is given back the same way a label excursion is: unless
+	// the walk gets all the way to the value's first reader, the load returns to
+	// where it stood before the first branch, and the result is what the flag off
+	// would have produced. Stopping halfway across a two-arm block frees no
+	// register and only lands the load somewhere the scheduler has less room -
+	// keeping those partial moves cost 2 words each on ten of the 45 generated
+	// programs and bought nothing on any of them.
+	const bool mayCrossBranch = vuSinkLoadsPastBranchesEnabled() && !m_sinkIndirectBranch;
+	std::map<std::string, unsigned int> seenBranchesTo;
+	std::set<std::string> pendingTargets;
+	std::set<std::string> passedLabels;
+
+	// The furthest position walked to that no outstanding jump passes over. With
+	// the flag off nothing is ever outstanding and this is just `target`.
+	std::list<Token>::iterator safeTarget = target;
 
 	// May this load be moved into the loop that starts at the next label? Two
 	// things have to hold across the back edge. The address must be the same
@@ -1732,25 +1824,50 @@ std::list<Token>::iterator RegisterAllocator::sinkTargetForLoad( std::list<Token
 		// was outside of, where it would run once per iteration.
 		if( !i->label().empty() )
 		{
-			// Only the first loop header may be crossed: the load then runs once
-			// per iteration of THAT loop, and letting it fall into the inner
-			// per-vertex loop as well would pay for the register in the hottest
-			// place there is. Labels that are not branched back to cost nothing
-			// and do not count.
-			const bool header = m_sinkLoopHeaders.find( i->label() ) != m_sinkLoopHeaders.end();
-			if( !mayCrossLabel || (header && crossedHeader) )
-				break;
-			if( !crossedLabel )
-				beforeLabel = i;
-			crossedLabel = true;
-			if( header )
-				crossedHeader = true;
+			// A pure join: every branch in the program that names this label has
+			// already been walked over, so the only way to be standing here is to
+			// have come through the load. Nothing is being entered and nothing is
+			// re-run, so this costs nothing and is not an excursion to give back.
+			// A label no branch names at all falls in here too, count zero.
+			unsigned int named = 0;
+			std::map<std::string, unsigned int>::const_iterator total =
+				m_sinkLabelBranchCount.find( i->label() );
+			if( total != m_sinkLabelBranchCount.end() )
+				named = total->second;
+			unsigned int walked = 0;
+			std::map<std::string, unsigned int>::const_iterator s =
+				seenBranchesTo.find( i->label() );
+			if( s != seenBranchesTo.end() )
+				walked = s->second;
+
+			if( !mayCrossBranch || named == 0 || walked != named )
+			{
+				// Only the first loop header may be crossed: the load then runs once
+				// per iteration of THAT loop, and letting it fall into the inner
+				// per-vertex loop as well would pay for the register in the hottest
+				// place there is. Labels that are not branched back to cost nothing
+				// and do not count.
+				const bool header = m_sinkLoopHeaders.find( i->label() ) != m_sinkLoopHeaders.end();
+				if( !mayCrossLabel || (header && crossedHeader) )
+					break;
+				if( !tookExcursion )
+					beforeExcursion = safeTarget;
+				tookExcursion = true;
+				if( header )
+					crossedHeader = true;
+			}
+
+			pendingTargets.erase( i->label() );
+			passedLabels.insert( i->label() );
+
 			// A label-only token carries no operand, so let it through here
 			// rather than fall into the "not a VU instruction" wall below.
 			if( !i->operand() )
 			{
 				target = i;
 				++target;
+				if( pendingTargets.empty() )
+					safeTarget = target;
 				continue;
 			}
 		}
@@ -1765,7 +1882,25 @@ std::list<Token>::iterator RegisterAllocator::sinkTargetForLoad( std::list<Token
 		if( i->flags() & (Token::PREORDERED | Token::E | Token::D | Token::T | Token::IGNORED) )
 			break;
 		if( i->operand()->unit() == Operand::BRU )
-			break;
+		{
+			if( !mayCrossBranch )
+				break;
+			// One immediate target and no register written: a conditional branch
+			// or a plain `b`. `bal` and `jr` leave through the empty string.
+			const std::string branchTarget = sinkBranchTargetLabel( *i );
+			if( branchTarget.empty() )
+				break;
+			// Backwards, into a loop whose body the load would then run once per
+			// iteration of - a different trade, and --sink-loads-into-loops makes
+			// it at the loop header where the conditions for it are checked.
+			if( passedLabels.find( branchTarget ) != passedLabels.end() )
+				break;
+			seenBranchesTo[ branchTarget ] += 1;
+			pendingTargets.insert( branchTarget );
+			if( !tookExcursion )
+				beforeExcursion = safeTarget;
+			tookExcursion = true;
+		}
 
 		VuTokenResourceAccess access;
 		if( !buildVuTokenResourceAccess( *i, access ) )
@@ -1787,8 +1922,12 @@ std::list<Token>::iterator RegisterAllocator::sinkTargetForLoad( std::list<Token
 			// straight past the load. And an excursion past a label is only
 			// worth its per-iteration cost if it got all the way to the reader,
 			// which this is.
-			if( crossedLabel && !i->label().empty() )
-				return beforeLabel;
+			if( tookExcursion && !i->label().empty() )
+				return beforeExcursion;
+			// A jump over this point is still outstanding, so the reader is on
+			// one arm and not the other, and this is not a home for the load.
+			if( !pendingTargets.empty() )
+				return beforeExcursion;
 			return target;
 		}
 
@@ -1820,12 +1959,14 @@ std::list<Token>::iterator RegisterAllocator::sinkTargetForLoad( std::list<Token
 
 		target = i;
 		++target;
+		if( pendingTargets.empty() )
+			safeTarget = target;
 	}
 
 	// Fell out on a barrier or on the end of the program rather than on a
 	// reader. Whatever ground was gained past the label is not worth paying for
 	// once per iteration, so give it back.
-	return crossedLabel ? beforeLabel : target;
+	return tookExcursion ? beforeExcursion : safeTarget;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1857,6 +1998,8 @@ unsigned int RegisterAllocator::sinkLoadsToFirstUse( std::list<Token>& tokens )
 	m_sinkLoopHeaders.clear();
 	m_sinkNameWrites.clear();
 	m_sinkStoreBaseUnknown = false;
+	m_sinkLabelBranchCount.clear();
+	m_sinkIndirectBranch = false;
 
 	// Which labels are the target of a backward branch, i.e. which ones a load
 	// would be moved INSIDE rather than merely past. Computed from list order,
@@ -1873,15 +2016,28 @@ unsigned int RegisterAllocator::sinkLoadsToFirstUse( std::list<Token>& tokens )
 		{
 			if( !t->operand() || t->operand()->unit() != Operand::BRU )
 				continue;
+			// How many branches name each label, over the whole program, and
+			// whether any branch goes somewhere this cannot say. One `jr` and
+			// every label in the program is potentially entered from a place the
+			// scan will never see, which is the one thing
+			// --sink-loads-past-branches must not be wrong about, so it gives up
+			// on the program entirely.
+			bool named = false;
 			for( std::list<Token::Argument>::const_iterator a = t->arguments().begin();
 			     a != t->arguments().end(); ++a )
 			{
 				if( !(a->flags() & Token::Argument::BRANCH) || a->type() != Token::Argument::IMMEDIATE )
 					continue;
 				std::map<std::string, unsigned int>::const_iterator l = labelIndex.find( a->immediate() );
-				if( l != labelIndex.end() && l->second <= index )
+				if( l == labelIndex.end() )
+					continue;
+				named = true;
+				m_sinkLabelBranchCount[ a->immediate() ] += 1;
+				if( l->second <= index )
 					m_sinkLoopHeaders.insert( a->immediate() );
 			}
+			if( !named )
+				m_sinkIndirectBranch = true;
 		}
 	}
 	for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t )
