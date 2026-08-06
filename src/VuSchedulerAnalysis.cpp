@@ -261,6 +261,64 @@ namespace
 		return best;
 	}
 
+	// Why did this primary find nobody to share its row with? chooseReadyPairPartner
+	// rejects for four reasons and returns one number, so the reasons are re-derived here
+	// and tallied. Six blind attempts at the remaining words all measured byte-identical
+	// output; this says which reason to attack.
+	void reportPairMiss( unsigned int primary,
+	                     const VuBasicBlock& block,
+	                     const std::vector<unsigned int>& incoming,
+	                     const std::vector<bool>& emitted,
+	                     const VuLatencyTracker& latencyTracker,
+	                     unsigned int ignoredImplicitWawResources,
+	                     unsigned int currentCycle )
+	{
+		unsigned int notReady = 0, samePipe = 0, resource = 0, latency = 0;
+		const bool primaryIsLower = tokenSchedulesAsLower( *block.tokens[primary],
+		                                                  ignoredImplicitWawResources );
+		const bool primaryWritesMac = tokenWritesMacForPair( *block.tokens[primary],
+		                                                     ignoredImplicitWawResources );
+		const int primaryDelay =
+		    pairingHazardDelay( latencyTracker, *block.tokens[primary], NULL,
+		                        static_cast<int>( currentCycle ) );
+
+		for( unsigned int i = 0; i < block.tokens.size(); ++i )
+		{
+			if( i == primary || emitted[i] )
+				continue;
+			if( incoming[i] != 0 )
+			{
+				++notReady;
+				continue;
+			}
+			if( tokenSchedulesAsLower( *block.tokens[i],
+			                           ignoredImplicitWawResources ) == primaryIsLower )
+			{
+				++samePipe;
+				continue;
+			}
+			if( !vuTokenPairResourcesAreIndependent( *block.tokens[primary],
+			                                         *block.tokens[i],
+			                                         primaryWritesMac,
+			                                         tokenWritesMacForPair( *block.tokens[i],
+			                                                               ignoredImplicitWawResources ) ) )
+			{
+				++resource;
+				continue;
+			}
+			if( pairingHazardDelay( latencyTracker, *block.tokens[primary], block.tokens[i],
+			                        static_cast<int>( currentCycle ) ) > primaryDelay )
+				++latency;
+		}
+
+		std::cerr << "[pairmiss] blk" << block.firstTokenIndex << " "
+		          << lowerVuTokenName( *block.tokens[primary] )
+		          << " notReady=" << notReady
+		          << " samePipe=" << samePipe
+		          << " resource=" << resource
+		          << " latency=" << latency << std::endl;
+	}
+
 	void markReadyTokenScheduled( unsigned int token,
 	                              std::vector<unsigned int>& incoming,
 	                              const std::vector< std::vector<unsigned int> >& outgoing,
@@ -787,6 +845,10 @@ namespace
 			                                                     latencyTracker,
 			                                                     ignoredImplicitWawResources,
 			                                                     currentCycle );
+			if( partner >= block.tokens.size() && vuShowPairMissesEnabled() )
+				reportPairMiss( best, block, incoming, emitted, latencyTracker,
+				                ignoredImplicitWawResources, currentCycle );
+
 			const Token* partnerToken = partner < block.tokens.size() ? block.tokens[partner] : NULL;
 			const int bestDelay =
 				latencyTracker.readHazardDelay( *block.tokens[best],

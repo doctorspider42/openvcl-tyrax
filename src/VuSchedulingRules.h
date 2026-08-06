@@ -115,6 +115,8 @@ bool vuBranchBubbleOnDependencyEnabled();
 void setVuLoopLivenessAlwaysEnabled( bool enabled );
 void setVuUpperMoveWithWEnabled( bool enabled );
 bool vuUpperMoveWithWEnabled();
+void setVuShowPairMissesEnabled( bool enabled );
+bool vuShowPairMissesEnabled();
 bool vuLoopLivenessAlwaysEnabled();
 
 void setVuBranchInterlockEnabled( bool enabled );

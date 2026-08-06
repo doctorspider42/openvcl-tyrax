@@ -581,6 +581,7 @@ namespace
 	bool g_branchInterlock = false;
 	bool g_loopLivenessAlways = false;
 	bool g_upperMoveWithW = false;
+	bool g_showPairMisses = false;
 	bool g_branchBubbleOnDependency = false;
 }
 
@@ -701,6 +702,17 @@ void setVuUpperMoveWithWEnabled( bool enabled )
 bool vuUpperMoveWithWEnabled()
 {
 	return g_upperMoveWithW;
+}
+
+// Diagnostics only: report why a row went out with one slot used.
+void setVuShowPairMissesEnabled( bool enabled )
+{
+	g_showPairMisses = enabled;
+}
+
+bool vuShowPairMissesEnabled()
+{
+	return g_showPairMisses;
 }
 
 void setVuBranchInterlockEnabled( bool enabled )
