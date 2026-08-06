@@ -134,25 +134,26 @@ namespace
 	// only behaviour openvcl had before --pair-best-of-many; the alternatives exist
 	// so that several complete schedules can be tried per segment and the shortest
 	// kept, which is why a variant can never make the output longer.
+	//
+	// Only the knobs some shipped strategy actually varies live here. Three more were
+	// swept and never won a single segment - the pipe-alternation bonus, the
+	// latency-load bonus, and a reward for unblocking an opposite-pipe successor - and
+	// their values are back to being the constants they effectively were. See
+	// "--pair-best-of-many" in the engine's docs/toolchain-image.md before adding one
+	// of them back.
 	struct VuReadySegmentStrategy
 	{
 		VuReadySegmentStrategy()
 		{
 			preferUnblockingWhenUnpaired = false;
 			priorityWeight = 20;
-			pipeAlternationBonus = 100;
-			oppositePipeUnblockBonus = 0;
 			longLatencyProducerBonus = 500;
-			latencyLoadBonus = 300;
 			partnerPrefersWorst = false;
 		}
 
 		bool preferUnblockingWhenUnpaired;
 		int priorityWeight;
-		int pipeAlternationBonus;
-		int oppositePipeUnblockBonus;
 		int longLatencyProducerBonus;
-		int latencyLoadBonus;
 		// Fill the row with the least valuable legal partner rather than the best one,
 		// leaving the valuable one to be a primary on a row of its own.
 		bool partnerPrefersWorst;
@@ -175,43 +176,15 @@ namespace
 		if( isVuLongLatencyProducer( *block.tokens[candidate] ) )
 			score -= strategy.longLatencyProducerBonus;
 		else if( isVuLatencyLoad( *block.tokens[candidate] ) )
-			score -= strategy.latencyLoadBonus;
+			score -= 300;
 
 		if( haveLastPipe && isVuLowerPipe( *block.tokens[candidate] ) != lastWasLower )
-			score -= strategy.pipeAlternationBonus;
+			score -= 100;
 
 		if( delay == 0 && candidate < priority.size() )
 			score -= static_cast<int>( priority[candidate] ) * strategy.priorityWeight;
 
 		return score;
-	}
-
-	// Does scheduling `candidate` now hand the OTHER pipe something to issue? The
-	// dominant reason a row goes out half empty in the env/matcap programs is
-	// samePipe - every ready instruction wants the slot already taken (313 of 484
-	// single-slot rows in stapip_clip_tce, against 201 of 502 in stapip_clip_c,
-	// where notReady dominates instead). samePipe cannot be fixed by picking a
-	// different partner at that cycle: there is none. It can only be fixed by
-	// making opposite-pipe work ready earlier, which is what this rewards.
-	bool unblocksOppositePipeSuccessor( unsigned int candidate,
-	                                    const VuBasicBlock& block,
-	                                    const std::vector<unsigned int>& incoming,
-	                                    const std::vector<bool>& emitted,
-	                                    const std::vector< std::vector<unsigned int> >& outgoing )
-	{
-		const bool candidateIsLower = isVuLowerPipe( *block.tokens[candidate] );
-		for( std::vector<unsigned int>::const_iterator edge = outgoing[candidate].begin();
-		     edge != outgoing[candidate].end();
-		     ++edge )
-		{
-			if( *edge >= block.tokens.size() || emitted[*edge] )
-				continue;
-			if( incoming[*edge] != 1 )
-				continue;      // candidate is not its last blocker
-			if( isVuLowerPipe( *block.tokens[*edge] ) != candidateIsLower )
-				return true;
-		}
-		return false;
 	}
 
 	std::vector<unsigned int> buildDependencyPriorities( const VuBasicBlock& block,
@@ -879,17 +852,14 @@ namespace
 				if( emitted[i] || incoming[i] != 0 )
 					continue;
 
-				int score = readyCandidateScore( i,
-				                                 haveLastPipe,
-				                                 lastWasLower,
-				                                 block,
-				                                 priority,
-				                                 latencyTracker,
-				                                 currentCycle,
-				                                 strategy );
-				if( strategy.oppositePipeUnblockBonus != 0
-				    && unblocksOppositePipeSuccessor( i, block, incoming, emitted, outgoing ) )
-					score -= strategy.oppositePipeUnblockBonus;
+				const int score = readyCandidateScore( i,
+				                                       haveLastPipe,
+				                                       lastWasLower,
+				                                       block,
+				                                       priority,
+				                                       latencyTracker,
+				                                       currentCycle,
+				                                       strategy );
 				if( best == block.tokens.size() || score < bestScore )
 				{
 					best = i;
