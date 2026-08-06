@@ -582,6 +582,7 @@ namespace
 	bool g_loopLivenessAlways = false;
 	bool g_upperMoveWithW = false;
 	bool g_showPairMisses = false;
+	bool g_pairBestOfTwo = false;
 	bool g_branchBubbleOnDependency = false;
 }
 
@@ -713,6 +714,19 @@ void setVuShowPairMissesEnabled( bool enabled )
 bool vuShowPairMissesEnabled()
 {
 	return g_showPairMisses;
+}
+
+// Schedule a segment both ways - with and without the unpaired-row re-pick - and keep the
+// shorter result. Off by default: it reorders a cyclic prefix that a software-pipelining
+// test pins down, and nobody outside this engine asked for the trade.
+void setVuPairBestOfTwoEnabled( bool enabled )
+{
+	g_pairBestOfTwo = enabled;
+}
+
+bool vuPairBestOfTwoEnabled()
+{
+	return g_pairBestOfTwo;
 }
 
 void setVuBranchInterlockEnabled( bool enabled )

@@ -64,6 +64,7 @@ public:
 	bool loopLivenessAlways() const;
 	bool upperMoveWithW() const;
 	bool showPairMisses() const;
+	bool pairBestOfTwo() const;
 	bool branchBubbleOnDependency() const;
 	bool genericSoftwarePipelining() const;
 	bool strictScheduleSlots() const;
@@ -147,6 +148,7 @@ private:
 		LOOP_LIVENESS_ALWAYS,
 		UPPER_MOVE_WITH_W,
 		SHOW_PAIR_MISSES,
+		PAIR_BEST_OF_TWO,
 		BRANCH_BUBBLE_ON_DEPENDENCY,
 		DISABLE_KNOWN_LOOP_OPTIMIZATIONS,
 		ENABLE_GENERIC_SOFTWARE_PIPELINING,
@@ -211,6 +213,7 @@ private:
 	bool m_loopLivenessAlways;
 	bool m_upperMoveWithW;
 	bool m_showPairMisses;
+	bool m_pairBestOfTwo;
 	bool m_branchBubbleOnDependency;
 	bool m_genericSoftwarePipelining;
 	bool m_strictScheduleSlots;

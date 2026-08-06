@@ -117,6 +117,8 @@ void setVuUpperMoveWithWEnabled( bool enabled );
 bool vuUpperMoveWithWEnabled();
 void setVuShowPairMissesEnabled( bool enabled );
 bool vuShowPairMissesEnabled();
+void setVuPairBestOfTwoEnabled( bool enabled );
+bool vuPairBestOfTwoEnabled();
 bool vuLoopLivenessAlwaysEnabled();
 
 void setVuBranchInterlockEnabled( bool enabled );

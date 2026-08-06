@@ -723,7 +723,8 @@ namespace
 	                                                                  unsigned int ignoredImplicitWawResources,
 	                                                                  VuLatencyTracker& latencyTracker,
 	                                                                  unsigned int blockStartCycle,
-	                                                                  unsigned int& currentCycle )
+	                                                                  unsigned int& currentCycle,
+	                                                                  bool preferUnblockingWhenUnpaired = false )
 	{
 		std::vector<VuScheduledIssueSlot> slots;
 		if( segment.size() < 2 )
@@ -848,6 +849,52 @@ namespace
 			if( partner >= block.tokens.size() && vuShowPairMissesEnabled() )
 				reportPairMiss( best, block, incoming, emitted, latencyTracker,
 				                ignoredImplicitWawResources, currentCycle );
+
+			// This row is going out half empty whatever fills it, so which instruction
+			// fills it is free - and can be spent on the NEXT row: prefer one that
+			// unblocks an instruction of the other pipe, since that is what makes the
+			// following row a pair. --show-pair-misses is what pointed here: `notReady`
+			// is the dominant reason a partner was unavailable (132 of 170 rows in
+			// stapip_clip_c) and resource conflicts are 0.
+			//
+			// Whether it pays depends on the segment, so the caller tries both and keeps
+			// the shorter schedule rather than anyone guessing a scope.
+			if( preferUnblockingWhenUnpaired && partner >= block.tokens.size() )
+			{
+				unsigned int rechosen = best;
+				int rechosenScore = 0;
+				bool have = false;
+				for( unsigned int i = 0; i < block.tokens.size(); ++i )
+				{
+					if( emitted[i] || incoming[i] != 0 )
+						continue;
+					if( isVuLowerPipe( *block.tokens[i] ) != isVuLowerPipe( *block.tokens[best] ) )
+						continue;
+					bool unblocks = false;
+					for( std::vector<unsigned int>::const_iterator edge = outgoing[i].begin();
+					     !unblocks && edge != outgoing[i].end(); ++edge )
+					{
+						if( *edge >= block.tokens.size() || emitted[*edge] )
+							continue;
+						if( incoming[*edge] != 1 )
+							continue;      // not its last blocker
+						if( isVuLowerPipe( *block.tokens[i] ) != isVuLowerPipe( *block.tokens[*edge] ) )
+							unblocks = true;
+					}
+					if( !unblocks )
+						continue;
+					const int score = readyCandidateScore( i, haveLastPipe, lastWasLower,
+					                                       block, priority, latencyTracker,
+					                                       currentCycle );
+					if( !have || score < rechosenScore )
+					{
+						have = true;
+						rechosen = i;
+						rechosenScore = score;
+					}
+				}
+				best = rechosen;
+			}
 
 			const Token* partnerToken = partner < block.tokens.size() ? block.tokens[partner] : NULL;
 			const int bestDelay =
@@ -990,12 +1037,48 @@ namespace
 	                                       unsigned int blockStartCycle,
 	                                       unsigned int& currentCycle )
 	{
+		if( !vuPairBestOfTwoEnabled() )
+		{
+			std::vector<VuScheduledIssueSlot> only =
+				scheduleReadySegmentIssueSlots( segment,
+				                                ignoredImplicitWawResources,
+				                                latencyTracker,
+				                                blockStartCycle,
+				                                currentCycle );
+			slots.insert( slots.end(), only.begin(), only.end() );
+			return;
+		}
+
+		// Two trial schedules on copies, then the winner for real. Fewer issue slots is
+		// fewer emitted rows, and the two strategies differ only in what fills a row that
+		// was going out half empty either way.
+		VuLatencyTracker plainTracker = latencyTracker;
+		unsigned int plainCycle = currentCycle;
+		const std::vector<VuScheduledIssueSlot> plain =
+			scheduleReadySegmentIssueSlots( segment,
+			                                ignoredImplicitWawResources,
+			                                plainTracker,
+			                                blockStartCycle,
+			                                plainCycle,
+			                                false );
+
+		VuLatencyTracker unblockTracker = latencyTracker;
+		unsigned int unblockCycle = currentCycle;
+		const std::vector<VuScheduledIssueSlot> unblocking =
+			scheduleReadySegmentIssueSlots( segment,
+			                                ignoredImplicitWawResources,
+			                                unblockTracker,
+			                                blockStartCycle,
+			                                unblockCycle,
+			                                true );
+
 		std::vector<VuScheduledIssueSlot> segmentSlots =
 			scheduleReadySegmentIssueSlots( segment,
 			                                ignoredImplicitWawResources,
 			                                latencyTracker,
 			                                blockStartCycle,
-			                                currentCycle );
+			                                currentCycle,
+			                                unblocking.size() < plain.size() );
 		slots.insert( slots.end(), segmentSlots.begin(), segmentSlots.end() );
 	}
 
