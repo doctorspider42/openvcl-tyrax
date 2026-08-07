@@ -2067,6 +2067,7 @@ bool Parser::tokenize()
 	setVuSinkLoadsAcrossStoresEnabled( m_cmdLine.sinkLoadsAcrossStores() );
 	setVuSinkLoadsIntoLoopsEnabled( m_cmdLine.sinkLoadsIntoLoops() );
 	setVuSinkLoadsPastBranchesEnabled( m_cmdLine.sinkLoadsPastBranches() );
+	setVuDropDeadWritesEnabled( m_cmdLine.dropDeadWrites() );
 	setVuShowPairMissesEnabled( m_cmdLine.showPairMisses() );
 	setVuPairBestOfTwoEnabled( m_cmdLine.pairBestOfTwo() );
 	setVuPairBestOfManyEnabled( m_cmdLine.pairBestOfMany() );

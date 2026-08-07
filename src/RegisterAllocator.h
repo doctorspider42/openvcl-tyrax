@@ -108,6 +108,14 @@ private:
 	// into m_aliases so the existing interference check picks them up.
 	void collectLiteralRegisterUsage( std::list<Token>& tokens );
 
+	// --drop-dead-writes.  Delete every token whose only effect is a value the
+	// program never reads.  Runs FIRST, before --sink-loads, so the sink pass and
+	// the allocator both see the smaller program, and renumbers the timeline from
+	// list position for the same reason the sink pass does.  Iterated to a fixed
+	// point: dropping `add.z k0, vf00, i` is what makes the `loi` above it dead.
+	// Returns the number of tokens removed.
+	unsigned int dropDeadRegisterWrites( std::list<Token>& tokens );
+
 	// --sink-loads.  Move each load down the token list to just before the value
 	// it loads is first read, or as far as a legal move goes.  Runs FIRST, before
 	// anything reads a line number, and renumbers the timeline from list position

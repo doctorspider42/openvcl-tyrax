@@ -109,6 +109,16 @@ bool RegisterAllocator::process( std::list<Token>& tokens )
 {
 	BranchState* branchState = NULL;
 
+	// Before the sink pass and before anything reads a line number: deleting a
+	// token is the only thing cheaper than scheduling it well, and every later
+	// pass - sinking, allocation, the scheduler - is better off not seeing it.
+	if( vuDropDeadWritesEnabled() )
+	{
+		const unsigned int dropped = dropDeadRegisterWrites( tokens );
+		if( m_showRegisterInfo )
+			std::cerr << "--drop-dead-writes removed " << dropped << " tokens" << std::endl;
+	}
+
 	// First, before anything reads a line number: this is the one pass that
 	// reorders the token list, and it rewrites the timeline when it does.
 	if( vuSinkLoadsEnabled() )
@@ -1725,6 +1735,271 @@ namespace
 		}
 		return target;
 	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace
+{
+	const unsigned int ALL_FIELDS = Token::X | Token::Y | Token::Z | Token::W;
+
+	// Every value the token reads and writes, keyed by name, with the field mask
+	// for each. Built from the arguments rather than from the flattened
+	// per-component key lists buildVuTokenResourceAccess produces, because this
+	// pass has to know whether a key came from a float - where a trailing ".x" is
+	// a component - or from an integer, where it could only be part of a name.
+	// `aliasOnly` comes back false as soon as one destination is a literal VFxx:
+	// a register the author named by number may be an interface with something
+	// this compiler cannot see, and is never a candidate for deletion.
+	void collectDeadWriteAccess( const Token& token,
+	                             std::map<std::string, unsigned int>& reads,
+	                             std::map<std::string, unsigned int>& writes,
+	                             bool& aliasOnly )
+	{
+		for( std::list<Token::Argument>::const_iterator a = token.arguments().begin();
+		     a != token.arguments().end(); ++a )
+		{
+			std::string key;
+			if( !vuRegisterKey( *a, key ) )
+				continue;
+
+			const bool isFloat = ( a->type() == Token::Argument::FLOAT_REGISTER );
+
+			if( a->flags() & Token::Argument::WRITE )
+			{
+				if( a->content() != Token::Argument::ALIAS )
+					aliasOnly = false;
+				writes[key] |= isFloat ? vuWriteFieldMask( token, *a ) : ALL_FIELDS;
+			}
+			else
+			{
+				reads[key] |= isFloat ? vuReadFieldMask( token, *a ) : ALL_FIELDS;
+			}
+		}
+	}
+
+	// The hardware resource an `out_hw_*`/`in_hw_*` directive names. Those are
+	// the program's contract with whatever runs next, so a resource one of them
+	// mentions is read even when no instruction reads it.
+	unsigned int declaredHardwareResource( const Token& token )
+	{
+		if( !token.operand() )
+			return VU_RESOURCE_NONE;
+		const std::string& n = token.operand()->name();
+		if( n == "out_hw_acc" || n == "in_hw_acc" )       return VU_RESOURCE_ACC;
+		if( n == "out_hw_i" || n == "in_hw_i" )           return VU_RESOURCE_I;
+		if( n == "out_hw_q" || n == "in_hw_q" )           return VU_RESOURCE_Q;
+		if( n == "out_hw_p" || n == "in_hw_p" )           return VU_RESOURCE_P;
+		if( n == "out_hw_r" || n == "in_hw_r" )           return VU_RESOURCE_R;
+		if( n == "out_hw_clip" || n == "in_hw_clip" )     return VU_RESOURCE_CLIP;
+		if( n == "out_hw_status" || n == "in_hw_status" ) return VU_RESOURCE_MAC;
+		return VU_RESOURCE_NONE;
+	}
+
+	// Can this token be considered for deletion at all? Everything with an effect
+	// the destination register does not describe is out: stores and xgkick, the
+	// auto-incrementing loads, branches and anything with a delay slot, a token
+	// carrying a label (its branches would lose their target), and every token a
+	// previous pass pinned.
+	bool tokenIsDeadWriteCandidate( const Token& token, VuTokenResourceAccess& access )
+	{
+		if( !token.operand() )
+			return false;
+		if( token.operand()->flags() & Operand::PREPROCESSOR )
+			return false;
+		if( token.operand()->unit() == Operand::ENTER
+		    || token.operand()->unit() == Operand::EXIT
+		    || token.operand()->unit() == Operand::BRU )
+			return false;
+		if( token.flags() & (Token::PREORDERED | Token::E | Token::D | Token::T
+		                     | Token::IGNORED | Token::BRANCH_DELAY_FILLER
+		                     | Token::KERNEL_BLOCK_BEGIN | Token::KERNEL_BLOCK_END) )
+			return false;
+		if( !token.label().empty() )
+			return false;
+		if( !buildVuTokenResourceAccess( token, access ) )
+			return false;
+		if( access.memoryKind == VU_MEMORY_STORE || access.memoryKind == VU_MEMORY_XGKICK )
+			return false;
+		if( access.memoryFlags & (VU_MEMORY_FLAG_PREDEC | VU_MEMORY_FLAG_POSTINC) )
+			return false;
+		if( access.branchDelaySlots != 0 )
+			return false;
+		return true;
+	}
+
+	// Does anything observe this token's write to `resources`? Walks forward from
+	// it: a reader says yes, another writer of the same resource says no, and
+	// anything the walk cannot follow - a label, a branch, a preprocessor
+	// directive, the end of the program - says yes, because the allocator has no
+	// dominance information and a wrong answer here is a miscompile.
+	//
+	// The caller has already masked `resources` down to what the program reads at
+	// all, which is what makes this useful: in a program with no MAC reader every
+	// FMAC's flag write drops out before the walk starts, and the walk only has
+	// to be right about the resources somebody really does read.
+	bool implicitWriteIsObservable( std::list<Token>::const_iterator token,
+	                                std::list<Token>::const_iterator end,
+	                                unsigned int resources )
+	{
+		unsigned int pending = resources;
+		for( ++token; token != end && pending != VU_RESOURCE_NONE; ++token )
+		{
+			if( !token->operand() )
+				continue;
+			if( token->operand()->flags() & Operand::PREPROCESSOR )
+				return true;
+			if( !token->label().empty() )
+				return true;
+
+			VuTokenResourceAccess access;
+			if( !buildVuTokenResourceAccess( *token, access ) )
+				return true;
+			if( access.implicitReads & pending )
+				return true;
+			if( token->operand()->unit() == Operand::BRU )
+				return true;
+
+			pending &= ~access.implicitWrites;
+		}
+		return pending != VU_RESOURCE_NONE;
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+unsigned int RegisterAllocator::dropDeadRegisterWrites( std::list<Token>& tokens )
+{
+	// The VU authoring layer emits a whole constant vector when the program reads
+	// two of its components, and a `lq` for every quadword the description names
+	// whether or not the body touches it. SCE's vcl drops both; openvcl carried
+	// them all the way to micro memory, which is where its generated code was
+	// losing to SCE's - measured over the 45 generated TyraX programs, openvcl
+	// emitted 312 more instructions than SCE at the same rows-per-instruction
+	// density, and 246 more rows.
+	//
+	// The analysis is deliberately the weakest one that finds them: a value is
+	// live if ANY token anywhere reads that component, with no control flow in
+	// it at all. Nothing here reasons about a write being dead on the path it is
+	// on while live on another - that needs dominance the allocator does not
+	// have - so a value read once, anywhere, keeps every write to it.
+	unsigned int removed = 0;
+
+	// A fixed point, because deleting the reader is what makes the producer dead.
+	// The bound is a guard, not a schedule: each round deletes at least one token
+	// or stops, so it cannot spin.
+	for( unsigned int round = 0; round < 32; ++round )
+	{
+		std::map<std::string, unsigned int> readFields;
+		std::set<std::string> protectedNames;
+		unsigned int resourcesRead = VU_RESOURCE_NONE;
+
+		for( std::list<Token>::const_iterator t = tokens.begin(); t != tokens.end(); ++t )
+		{
+			if( !t->operand() )
+				continue;
+
+			// A name mentioned by in_vf/out_vf, and any other string a directive
+			// carries, is part of the program's interface. Collected as raw text
+			// because that is how the directives hold it - out_vf's argument is an
+			// immediate whose spelling is the alias name, not a register operand.
+			if( t->operand()->flags() & Operand::PREPROCESSOR )
+			{
+				resourcesRead |= declaredHardwareResource( *t );
+				for( std::list<Token::Argument>::const_iterator a = t->arguments().begin();
+				     a != t->arguments().end(); ++a )
+				{
+					if( !a->immediate().empty() ) protectedNames.insert( a->immediate() );
+					if( !a->alias().empty() )     protectedNames.insert( a->alias() );
+					if( !a->text().empty() )      protectedNames.insert( a->text() );
+				}
+				continue;
+			}
+
+			std::map<std::string, unsigned int> reads, writes;
+			bool aliasOnly = true;
+			collectDeadWriteAccess( *t, reads, writes, aliasOnly );
+			for( std::map<std::string, unsigned int>::const_iterator r = reads.begin();
+			     r != reads.end(); ++r )
+				readFields[r->first] |= r->second;
+
+			VuTokenResourceAccess access;
+			if( buildVuTokenResourceAccess( *t, access ) )
+				resourcesRead |= access.implicitReads;
+		}
+
+		unsigned int roundRemoved = 0;
+		for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); )
+		{
+			VuTokenResourceAccess access;
+			if( !tokenIsDeadWriteCandidate( *t, access ) )
+			{
+				++t;
+				continue;
+			}
+
+			std::map<std::string, unsigned int> reads, writes;
+			bool aliasOnly = true;
+			collectDeadWriteAccess( *t, reads, writes, aliasOnly );
+
+			// A token that writes no register and no resource is a nop, a waitq or
+			// something else placed for its timing. Not this pass's business.
+			if( writes.empty() && access.implicitWrites == VU_RESOURCE_NONE )
+			{
+				++t;
+				continue;
+			}
+
+			bool dead = aliasOnly;
+			for( std::map<std::string, unsigned int>::const_iterator w = writes.begin();
+			     dead && w != writes.end(); ++w )
+			{
+				if( protectedNames.find( w->first ) != protectedNames.end() )
+					dead = false;
+				else
+				{
+					const std::map<std::string, unsigned int>::const_iterator r =
+						readFields.find( w->first );
+					if( r != readFields.end() && (r->second & w->second) != 0 )
+						dead = false;
+				}
+			}
+
+			if( dead )
+			{
+				const unsigned int live = access.implicitWrites & resourcesRead;
+				if( live != VU_RESOURCE_NONE
+				    && implicitWriteIsObservable( t, tokens.end(), live ) )
+					dead = false;
+			}
+
+			if( !dead )
+			{
+				++t;
+				continue;
+			}
+
+			t = tokens.erase( t );
+			++roundRemoved;
+		}
+
+		if( roundRemoved == 0 )
+			break;
+		removed += roundRemoved;
+	}
+
+	if( removed )
+	{
+		// Same reason the sink pass renumbers: the allocator's timeline is the
+		// token's line number, and after an erase it is no longer an ordering.
+		// The Line each token was parsed from is untouched, so diagnostics still
+		// point at the source the user wrote.
+		unsigned int line = 1;
+		for( std::list<Token>::iterator i = tokens.begin(); i != tokens.end(); ++i )
+			i->setLineNumber( line++ );
+	}
+
+	return removed;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

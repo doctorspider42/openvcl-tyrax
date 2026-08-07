@@ -587,6 +587,7 @@ namespace
 	bool g_sinkLoadsAcrossStores = false;
 	bool g_sinkLoadsIntoLoops = false;
 	bool g_sinkLoadsPastBranches = false;
+	bool g_dropDeadWrites = false;
 	bool g_showPairMisses = false;
 	bool g_pairBestOfTwo = false;
 	bool g_pairBestOfMany = false;
@@ -770,6 +771,20 @@ void setVuSinkLoadsPastBranchesEnabled( bool enabled )
 bool vuSinkLoadsPastBranchesEnabled()
 {
 	return g_sinkLoadsPastBranches;
+}
+
+// --drop-dead-writes: delete an instruction whose only effect is a value nothing
+// ever reads. Off by default because it deletes code the author wrote, and an
+// author who writes a value the program never reads may be describing an
+// interface this compiler cannot see.
+void setVuDropDeadWritesEnabled( bool enabled )
+{
+	g_dropDeadWrites = enabled;
+}
+
+bool vuDropDeadWritesEnabled()
+{
+	return g_dropDeadWrites;
 }
 
 // Diagnostics only: report why a row went out with one slot used.

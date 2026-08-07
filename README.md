@@ -122,15 +122,16 @@ Useful options:
 | `--sink-loads-across-stores` | let a sinking load pass a store through a *different* base register — an aliasing assumption, and the one SCE's `vcl` makes in its own output |
 | `--sink-loads-into-loops` | let a sinking load pass one loop header, so a preamble load whose only readers are inside the batch loop stops pinning a register across the whole program |
 | `--sink-loads-past-branches` | let a sinking load cross a branch to a point every path out of its old position reaches, and only after an allocation has already run out of registers |
+| `--drop-dead-writes` | delete a token whose register destination is read nowhere in the program, field by field, and whose MAC/CLIP/I/Q/P/R/ACC writes nothing observes either |
 | `--enable-generic-software-pipelining` | enable safe generic software-pipeline rewrites, currently the default |
 | `--disable-generic-software-pipelining` | disable generic software-pipeline rewrites for comparison/debugging |
 | `--strict-schedule-slots` | emit from the typed scheduler slot model without legacy lookahead pairing |
 
 `-M`, `-P`, and `-Z` are accepted for VCL command-line compatibility.
 
-The sixteen density and register-allocation options are additions this fork
-makes to OpenVCL, and every one of them is off by default. What each is for and
-what it measured are in [`NOTICE-TYRAX.md`](NOTICE-TYRAX.md).
+The seventeen density, register-allocation and dead-code options are additions
+this fork makes to OpenVCL, and every one of them is off by default. What each is
+for and what it measured are in [`NOTICE-TYRAX.md`](NOTICE-TYRAX.md).
 
 ## VSM Cost Analysis
 

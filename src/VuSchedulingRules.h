@@ -213,6 +213,13 @@ bool vuSinkLoadsIntoLoopsEnabled();
 // change a count. Only has an effect together with --sink-loads.
 void setVuSinkLoadsPastBranchesEnabled( bool enabled );
 bool vuSinkLoadsPastBranchesEnabled();
+// Delete a token whose register destination is dead - no reader anywhere in the
+// program, field by field - and whose implicit writes (MAC/CLIP/I/Q/P/R/ACC)
+// nothing observes either. Iterated to a fixed point, so the `loi` feeding a
+// deleted reader goes with it. Only aliases are candidates: a literal VFxx an
+// author named by number may be an interface with the outside world.
+void setVuDropDeadWritesEnabled( bool enabled );
+bool vuDropDeadWritesEnabled();
 void setVuShowPairMissesEnabled( bool enabled );
 bool vuShowPairMissesEnabled();
 void setVuPairBestOfTwoEnabled( bool enabled );
