@@ -1639,6 +1639,33 @@ void CodeGenerator::padForBranchPreBubble( const Token& token )
 	}
 }
 
+// What one line of m_codeLines IS. Two callers ask, and they must not be allowed to
+// disagree about what a word is: emittedRowsSinceClipWrite() measures a distance back
+// to a CLIP in words, emittedWordCount() measures the whole program in the same unit.
+// Only an instruction row occupies micro memory - blank lines, `.directives`,
+// `; source` comments and `label:` lines do not.
+namespace
+{
+	enum EmittedLineKind
+	{
+		EMITTED_NOTHING,
+		EMITTED_LABEL,
+		EMITTED_ROW
+	};
+
+	EmittedLineKind classifyEmittedLine( const std::string& line )
+	{
+		const std::string::size_type first = line.find_first_not_of( " \t" );
+		if( first == std::string::npos )
+			return EMITTED_NOTHING;
+		if( line[first] == ';' || line[first] == '.' )
+			return EMITTED_NOTHING;
+		if( line[line.size() - 1] == ':' )
+			return EMITTED_LABEL;
+		return EMITTED_ROW;
+	}
+}
+
 unsigned int CodeGenerator::emittedRowsSinceClipWrite() const
 {
 	// How many instruction rows have been EMITTED since the row holding a CLIP.
@@ -1658,12 +1685,10 @@ unsigned int CodeGenerator::emittedRowsSinceClipWrite() const
 	     i != m_codeLines.rend(); ++i )
 	{
 		const std::string& line = *i;
-		const std::string::size_type first = line.find_first_not_of( " 	" );
-		if( first == std::string::npos )
+		const EmittedLineKind kind = classifyEmittedLine( line );
+		if( kind == EMITTED_NOTHING )
 			continue;
-		if( line[first] == ';' || line[first] == '.' )
-			continue;
-		if( line[line.size() - 1] == ':' )
+		if( kind == EMITTED_LABEL )
 			break;
 		// The mnemonic comes from the opcode metadata, never a literal - there is a
 		// unit test that enforces exactly that (test_codegen_instruction_literals).
@@ -1674,6 +1699,28 @@ unsigned int CodeGenerator::emittedRowsSinceClipWrite() const
 			break;
 	}
 	return 0xFFFFu;
+}
+
+unsigned int CodeGenerator::emittedWordCount() const
+{
+	// The size the emitted program occupies in micro memory, counted the way nm
+	// counts it in the size gate: (CodeEnd - CodeStart) / 8 is one word per
+	// instruction row, and the trailing `.align 4` rounds an odd count up to an even
+	// upload.
+	//
+	// Deliberately the finished emission and not the scheduler's own estimate,
+	// vuScheduledProgramEmittedWordCount(): after the scheduler is done the emitter
+	// still retracts rows into branch delay slots, pads clip windows and adds the [E]
+	// pair, so the two numbers do not have to agree, and only this one is the number
+	// the assembler will produce.
+	unsigned int rows = 0;
+	for( std::list<std::string>::const_iterator i = m_codeLines.begin();
+	     i != m_codeLines.end(); ++i )
+	{
+		if( classifyEmittedLine( *i ) == EMITTED_ROW )
+			++rows;
+	}
+	return rows + ( rows & 1u );
 }
 
 bool CodeGenerator::clipReadIsPositional( const Token& token ) const

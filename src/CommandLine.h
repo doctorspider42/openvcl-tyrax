@@ -69,6 +69,7 @@ public:
 	bool sinkLoadsAcrossStores() const;
 	bool sinkLoadsIntoLoops() const;
 	bool sinkLoadsPastBranches() const;
+	bool sinkLoadsBestOf() const;
 	bool dropDeadWrites() const;
 	bool exemptFullClipMasks() const;
 	bool clipExemptionBestOf() const;
@@ -163,6 +164,7 @@ private:
 		SINK_LOADS_ACROSS_STORES,
 		SINK_LOADS_INTO_LOOPS,
 		SINK_LOADS_PAST_BRANCHES,
+		SINK_LOADS_BEST_OF,
 		DROP_DEAD_WRITES,
 		EXEMPT_FULL_CLIP_MASKS,
 		CLIP_EXEMPTION_BEST_OF,
@@ -238,6 +240,7 @@ private:
 	bool m_sinkLoadsAcrossStores;
 	bool m_sinkLoadsIntoLoops;
 	bool m_sinkLoadsPastBranches;
+	bool m_sinkLoadsBestOf;
 	bool m_dropDeadWrites;
 	bool m_exemptFullClipMasks;
 	bool m_clipExemptionBestOf;

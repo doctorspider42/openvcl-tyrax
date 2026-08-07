@@ -1137,6 +1137,8 @@ Parser::Parser()
 	m_tempCounter = 0;
 
 	m_preParser = DISABLED;
+
+	m_haveUnsunkOutput = false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2163,16 +2165,142 @@ bool Parser::allocateRegisters()
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+bool Parser::generateCodeInto( CodeGenerator& generator, const std::string& name,
+                               const std::list<Token>& tokens )
+{
+	generator.setEmitSource( m_cmdLine.emitSource() );
+	generator.setKnownLoopOptimizations( m_cmdLine.knownLoopOptimizations() );
+	generator.setGenericSoftwarePipelining( m_cmdLine.genericSoftwarePipelining() );
+	generator.setStrictScheduleSlots( m_cmdLine.strictScheduleSlots() );
+	generator.setName( name );
+
+	return generator.beginProcess( tokens );
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// --sink-loads-best-of.  Compile the program a second time with all four
+// --sink-loads* flags off, and keep whichever whole program is smaller.
+//
+// The four sinking flags exist because without them eleven of the forty-five
+// microprograms a TyraX project can generate run out of registers - sinking a load to
+// its reader is what shortens the live range that does not fit.  But where the unsunk
+// arm DOES allocate it is usually the better code: sinking moves a load next to the
+// instruction that reads it, and the allocator, which runs before the scheduler, then
+// writes an anti-dependence between the two that the scheduler cannot undo.  Over the
+// fifty-nine programs that compile both ways the unsunk arm is smaller far more often
+// than it is larger, so the flags were paying for eleven programs out of the pockets
+// of the other fifty-nine.  Best-of stops that: the sinking arm becomes a fallback for
+// exactly the programs that need it.
+//
+// Three things about the shape of this, each of which was the alternative:
+//
+// * The sinking arm runs FIRST and runs to completion - allocation in
+//   allocateRegisters(), emission in generateCode() - through code this function does
+//   not touch.  So with the flag on, a program the flag does not improve is emitted by
+//   the same code, in the same order, as with the flag off.  The reverse order would
+//   have made the ordinary output the second arm's, and the second arm is the one that
+//   sees a heap the first arm has already churned; parts of the allocator iterate
+//   std::set<Alias*>, which is address order.
+//
+// * The second arm re-runs the TOKENIZER rather than working from a copy of the token
+//   list.  A copy would have to be taken before the first allocation and held alive
+//   across the first emission, which changes what the first arm's own allocations look
+//   like - the thing the point above exists to prevent.  m_lines outlives everything
+//   and re-parsing it is free by comparison.
+//
+// * The choice is per PROGRAM, on the finished word count, exactly like
+//   --clip-exemption-best-of.  A tie keeps the sinking arm, so the flag can only ever
+//   be read as a win over the build without it.
+void Parser::tryUnsunkArm()
+{
+	// A fresh tokenizer, allocator and generator, so nothing the first arm built -
+	// aliases hung off token arguments, branch states, the emitted line list - can
+	// leak into the second and quietly poison it.  A half-applied first pass would
+	// not crash; it would emit a wrong program.
+	Tokenizer tokenizer;
+	tokenizer.setNewSyntax( m_cmdLine.newSyntax() );
+	tokenizer.setOperands( m_operands );
+
+	const bool sink = vuSinkLoadsEnabled();
+	const bool sinkAcrossStores = vuSinkLoadsAcrossStoresEnabled();
+	const bool sinkIntoLoops = vuSinkLoadsIntoLoopsEnabled();
+	const bool sinkPastBranches = vuSinkLoadsPastBranchesEnabled();
+
+	setVuSinkLoadsEnabled( false );
+	setVuSinkLoadsAcrossStoresEnabled( false );
+	setVuSinkLoadsIntoLoopsEnabled( false );
+	setVuSinkLoadsPastBranchesEnabled( false );
+
+	// Running out of registers is this arm's normal outcome for the eleven, and a
+	// decision rather than a diagnosis - the same bargain the --sink-loads-past-branches
+	// retry above makes.  Anything wrong with the INPUT was already reported by the
+	// first arm, which ran unsuppressed and succeeded.
+	Error::SetSuppressed( true );
+
+	bool built = true;
+	for( std::list<Line>::const_iterator i = m_lines.begin(); built && i != m_lines.end(); ++i )
+	{
+		if( !tokenizer.parse( *i ) )
+			built = false;
+	}
+
+	CodeGenerator generator;
+
+	if( built )
+	{
+		RegisterAllocator allocator;
+		allocator.setAvailableFloats( tokenizer.availableFloats() );
+		allocator.setAvailableIntegers( tokenizer.availableIntegers() );
+		allocator.setDynamicThreshold( m_cmdLine.threshold() );
+		// Not setShowRegisterInfo: --show-reg-alloc describes the allocation that
+		// produced the output, and this one usually does not.
+		built = allocator.process( tokenizer.tokens() );
+
+		if( built )
+			built = generateCodeInto( generator, allocator.name(), tokenizer.tokens() );
+	}
+
+	Error::SetSuppressed( false );
+
+	setVuSinkLoadsEnabled( sink );
+	setVuSinkLoadsAcrossStoresEnabled( sinkAcrossStores );
+	setVuSinkLoadsIntoLoopsEnabled( sinkIntoLoops );
+	setVuSinkLoadsPastBranchesEnabled( sinkPastBranches );
+
+	if( !built )
+	{
+		if( m_cmdLine.showPairMisses() )
+			std::cerr << "[sinkbestof] unsunk arm did not compile, keeping the sunk one" << std::endl;
+		return;
+	}
+
+	const unsigned int sunkWords = m_codeGenerator.emittedWordCount();
+	const unsigned int unsunkWords = generator.emittedWordCount();
+
+	if( m_cmdLine.showPairMisses() )
+		std::cerr << "[sinkbestof] sunk=" << sunkWords
+		          << " unsunk=" << unsunkWords
+		          << " keep=" << ( unsunkWords < sunkWords ? "unsunk" : "sunk" ) << std::endl;
+
+	if( unsunkWords >= sunkWords )
+		return;
+
+	std::stringstream text;
+	generator.write( text );
+	m_unsunkOutput = text.str();
+	m_haveUnsunkOutput = true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 bool Parser::generateCode()
 {
-	m_codeGenerator.setEmitSource( m_cmdLine.emitSource() );
-	m_codeGenerator.setKnownLoopOptimizations( m_cmdLine.knownLoopOptimizations() );
-	m_codeGenerator.setGenericSoftwarePipelining( m_cmdLine.genericSoftwarePipelining() );
-	m_codeGenerator.setStrictScheduleSlots( m_cmdLine.strictScheduleSlots() );
-	m_codeGenerator.setName( m_registerAllocator.name() );
-
-	if( !m_codeGenerator.beginProcess( m_tokenizer.tokens() ) )
+	if( !generateCodeInto( m_codeGenerator, m_registerAllocator.name(), m_tokenizer.tokens() ) )
 		return false;
+
+	if( m_cmdLine.sinkLoads() && m_cmdLine.sinkLoadsBestOf() )
+		tryUnsunkArm();
 
 	setState( WRITE_OUTPUT );
 
@@ -2209,7 +2337,10 @@ bool Parser::writeOutput()
 
 bool Parser::writeOutputStream( std::ostream& stream )
 {
-	m_codeGenerator.write( stream );
+	if( m_haveUnsunkOutput )
+		stream << m_unsunkOutput;
+	else
+		m_codeGenerator.write( stream );
 
 	setState( EXIT );
 

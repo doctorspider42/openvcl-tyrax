@@ -8,8 +8,8 @@ standard VSM/DSM-style output that can be assembled by the PS2 toolchain.
 [ps2dev/openvcl](https://github.com/ps2dev/openvcl) at commit
 `a5867c3daf03828806ee966aca4116622da3f671` (v0.4.0) and maintained for
 [TyraX](https://github.com/doctorspider42/tyra-editor), a PlayStation 2 game
-editor. It adds nineteen options to upstream, all of them off by default, and
-one unconditional correctness fix. With all nineteen on, the fork assembles
+editor. It adds twenty options to upstream, all of them off by default, and
+one unconditional correctness fix. With all twenty on, the fork assembles
 TyraX's entire VU corpus in less micro memory than Sony's `vcl` needs for the
 same programs — and runs it about 26% slower, measured on a geometry-heavy scene.
 Both halves are in *What it buys* and *Known limits*; the second one is open.
@@ -39,9 +39,9 @@ reference:
 
 | | Sony `vcl` | this fork | |
 |---|---:|---:|---|
-| engine resident VU1 set | 2028 words | **1986** | ceiling is 2042; upstream did not fit at all |
-| engine corpus, all 25 programs | 3982 words | **3976** | under Sony |
-| generated corpus, 45 programs | 9264 words | **9286** | +0.24% |
+| engine resident VU1 set | 2028 words | **1978** | ceiling is 2042; upstream did not fit at all |
+| engine corpus, all 25 programs | 3982 words | **3928** | under Sony |
+| generated corpus, 45 programs | 9264 words | **9254** | under Sony too, as of the twentieth flag |
 | programs that compile | 45 / 45 | **45 / 45** | upstream at the fork point: 23 |
 | frame rate, VU1-bound scene | 104.96 FPS | **77.97 / 74.99** | about 26% slower - see *Known limits* |
 
@@ -50,7 +50,7 @@ GIF packet VU1 stages on a sampled flush is identical across the whole dump bar
 the microprogram entry address. Upstream's own test suite — 419 tests, 4465
 assertions — passes unmodified.
 
-## The nineteen options
+## The twenty options
 
 Every one is off by default and each was added to close a measured gap, in this
 order.
@@ -99,6 +99,29 @@ every failure being *Register allocation ran out of registers*.
 | `--sink-loads-across-stores` | let a sinking load pass a store through a *different* base register — an aliasing assumption, and the one Sony's `vcl` makes in its own output |
 | `--sink-loads-into-loops` | let a sinking load pass one loop header, so a preamble load whose only readers are inside the batch loop stops pinning a register across the whole program |
 | `--sink-loads-past-branches` | let a sinking load cross a branch to a point every path out of its old position reaches |
+| `--sink-loads-best-of` | allocate and emit the program both with and without load sinking, and keep the fewer words |
+
+`--sink-loads-best-of` is the flag that made this fork smaller than Sony's `vcl`
+on every corpus. These four sinking flags exist because 11 of the 45 generated
+programs cannot allocate without them — but where the unsunk arm *does*
+allocate it is smaller, because the sinking that buys a register costs rows
+elsewhere. So allocation and emission run **both ways per program** and the
+fewer words win, falling back to the sunk arm wherever the unsunk one fails.
+18 of the 70 take the unsunk arm, 41 keep the sunk one, 11 fall back.
+
+Three things make running allocation twice safe. The sunk arm runs first and to
+completion through untouched code, so output with the flag off is unchanged by
+construction rather than by luck. The second arm re-runs the tokenizer off the
+source lines instead of restoring a token-list copy — such a copy would have to
+be held across the first emission, and parts of the allocator iterate
+`std::set<Alias*>`, i.e. in address order. And each arm gets a fresh tokenizer,
+allocator and generator with errors suppressed on the second, so a failed
+allocation is a decision rather than a diagnosis. Measured: all 70 emitted
+programs are byte-identical to one of the two standalone arms, none matching
+neither.
+
+It costs roughly double VU compile time, because no predicate can skip the
+second arm — you cannot know whether a program allocates without trying.
 
 `--sink-loads-past-branches` is not applied speculatively. Carrying a load over
 a branch reorders the block it lands in, and over the 45 programs that was worth
@@ -336,8 +359,8 @@ Useful options:
 
 `-M`, `-P`, and `-Z` are accepted for VCL command-line compatibility.
 
-The nineteen density, register-allocation, dead-code and CLIP options this fork
-adds are listed above, under *The nineteen options*.
+The twenty density, register-allocation, dead-code and CLIP options this fork
+adds are listed above, under *The twenty options*.
 
 ## VSM Cost Analysis
 

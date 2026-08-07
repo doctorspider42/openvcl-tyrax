@@ -99,6 +99,16 @@ private:
 	bool generateCode();
 	bool writeOutput();
 
+	// The body of generateCode(), against a caller-supplied generator instead of
+	// m_codeGenerator, so --sink-loads-best-of can emit its second arm into one of
+	// its own without disturbing the first.
+	bool generateCodeInto( CodeGenerator& generator, const std::string& name,
+	                       const std::list<Token>& tokens );
+
+	// --sink-loads-best-of.  Compile the whole program a second time with load
+	// sinking off and keep that output instead when it is the smaller one.
+	void tryUnsunkArm();
+
 	bool readInputStream( std::istream& stream );
 	bool writeOutputStream( std::ostream& stream );
 
@@ -123,6 +133,13 @@ private:
 
 	std::string m_inputFile;
 	std::string m_sourceFile;
+
+	// --sink-loads-best-of.  When the unsunk arm wins, its finished text is parked
+	// here and written in place of m_codeGenerator's.  The winning generator is not
+	// kept alive instead, so that m_codeGenerator - the arm that runs first, and the
+	// only one that is the compiler's ordinary output - is never touched by the flag.
+	bool m_haveUnsunkOutput;
+	std::string m_unsunkOutput;
 };
 
 }

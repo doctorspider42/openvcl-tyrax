@@ -43,6 +43,11 @@ public:
 	bool beginProcess(const std::list<Token>& tokens);
 	bool write(std::ostream& stream);
 
+	// Size of everything emitted so far, in micro-memory words, counted the way nm
+	// counts it - see the definition.  Only meaningful after beginProcess().  This
+	// is what --sink-loads-best-of compares its two arms on.
+	unsigned int emittedWordCount() const;
+
 	void setEmitSource( bool emitSource );
 	bool emitSource() const;
 

@@ -88,6 +88,7 @@ CommandLine::CommandLine()
 	m_sinkLoadsAcrossStores = false;
 	m_sinkLoadsIntoLoops = false;
 	m_sinkLoadsPastBranches = false;
+	m_sinkLoadsBestOf = false;
 	m_dropDeadWrites = false;
 	m_exemptFullClipMasks = false;
 	m_clipExemptionBestOf = false;
@@ -158,6 +159,7 @@ CommandLine::CommandLine()
 	m_options.push_back(Option(0,"sink-loads-across-stores",SINK_LOADS_ACROSS_STORES,false));
 	m_options.push_back(Option(0,"sink-loads-into-loops",SINK_LOADS_INTO_LOOPS,false));
 	m_options.push_back(Option(0,"sink-loads-past-branches",SINK_LOADS_PAST_BRANCHES,false));
+	m_options.push_back(Option(0,"sink-loads-best-of",SINK_LOADS_BEST_OF,false));
 	m_options.push_back(Option(0,"drop-dead-writes",DROP_DEAD_WRITES,false));
 	m_options.push_back(Option(0,"exempt-full-clip-masks",EXEMPT_FULL_CLIP_MASKS,false));
 	m_options.push_back(Option(0,"clip-exemption-best-of",CLIP_EXEMPTION_BEST_OF,false));
@@ -292,6 +294,7 @@ bool CommandLine::parse( int argc, char* argv[] )
 				case SINK_LOADS_ACROSS_STORES: m_sinkLoadsAcrossStores = true; break;
 				case SINK_LOADS_INTO_LOOPS: m_sinkLoadsIntoLoops = true; break;
 				case SINK_LOADS_PAST_BRANCHES: m_sinkLoadsPastBranches = true; break;
+				case SINK_LOADS_BEST_OF: m_sinkLoadsBestOf = true; break;
 				case DROP_DEAD_WRITES: m_dropDeadWrites = true; break;
 				case EXEMPT_FULL_CLIP_MASKS: m_exemptFullClipMasks = true; break;
 				case CLIP_EXEMPTION_BEST_OF: m_clipExemptionBestOf = true; break;
