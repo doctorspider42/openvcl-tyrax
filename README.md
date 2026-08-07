@@ -11,7 +11,8 @@ standard VSM/DSM-style output that can be assembled by the PS2 toolchain.
 editor. It adds nineteen options to upstream, all of them off by default, and
 one unconditional correctness fix. With all nineteen on, the fork assembles
 TyraX's entire VU corpus in less micro memory than Sony's `vcl` needs for the
-same programs.
+same programs — and runs it about 26% slower, measured on a geometry-heavy scene.
+Both halves are in *What it buys* and *Known limits*; the second one is open.
 
 Upstream has not seen or accepted these changes. Report problems here, not to
 ps2dev. Licence is unchanged: **Academic Free License v2.0**, see
@@ -42,6 +43,7 @@ reference:
 | engine corpus, all 25 programs | 3982 words | **3976** | under Sony |
 | generated corpus, 45 programs | 9264 words | **9286** | +0.24% |
 | programs that compile | 45 / 45 | **45 / 45** | upstream at the fork point: 23 |
+| frame rate, VU1-bound scene | 104.96 FPS | **77.97 / 74.99** | about 26% slower - see *Known limits* |
 
 The rendered frame is pixel-identical to a Sony-`vcl` build in PCSX2, and the
 GIF packet VU1 stages on a sampled flush is identical across the whole dump bar
@@ -176,12 +178,41 @@ selects, and how many pushes have happened since, through the dependency graph,
 the pair test, the latency tracker and `emittedRowsSinceClipWrite`.
 
 That is a redesign in the part of this compiler with the worst defect record,
-and the measurement says it would buy nothing. Every extra padding row sits in a
+and the measurement says it would buy little. Every extra padding row sits in a
 **per-primitive** loop; not one is in the per-edge loop of the Sutherland-
 Hodgman clip test, and in that loop — the only genuinely hot one — **both
 assemblers pad identically**. Weighted by loop nesting the remaining words come
-out *negative*: this fork pays about 4.7 cycles per triangle for clip padding
-and takes back 8–9 in the fan emitter it schedules better.
+out *negative in rows*: this fork pays about 4.7 rows per triangle for clip
+padding and takes back 8–9 in the fan emitter it schedules better.
+
+**This fork is smaller than Sony's `vcl` and slower than it, and the second half
+was missed for a while because rows were being counted as cycles.** A row model
+cannot see the FMAC read-after-write interlock — a stall the hardware takes and
+no instruction records, which is exactly what `--fmac-interlock` stops paying for
+in words. Model it (an FMAC RAW pass added to this compiler's own `--cost`
+analyzer, calibrated against SCE's own `STALL_LATENCY` annotations to within
+2.1%) and the picture is:
+
+| | Sony `vcl` | this fork |
+|---|---:|---:|
+| cycles, all 70 programs | 16030 | **26090 (+62.8%)** |
+| FMAC stall cycles | 2614 | **12452 (4.8x)** |
+| rows | — | +0.2% |
+
+Measured rather than modelled, on a geometry-heavy scene in PCSX2 with the same
+compiler, engine and scene on both sides and only the assembler different:
+**Sony 104.96 FPS, this fork 77.97 and 74.99 — about 26% slower.** On a scene
+that is not VU1-bound the two are indistinguishable (86.96 against 86.97), which
+is worth knowing mostly as a warning about measuring nothing.
+
+The cause is not ready-list ranking. SCE interleaves three independent copies of
+a serial chain so each step sits three rows from its producer; this fork runs
+them one at a time and stalls at every step. Instrumenting the ready list found
+that of 2011 stalling scheduling steps in one program, only 168 (8.4%) had a
+zero-delay alternative available at all. The list is dry because **register
+allocation runs before scheduling** and its anti-dependences merge the
+independent chains into one. The order of those two passes is the problem, and it
+is open.
 
 **The loop-liveness bail-out has no minimal reproducer.** Without
 `--loop-liveness-always`, three of five `as_is_*` programs clobber a register
