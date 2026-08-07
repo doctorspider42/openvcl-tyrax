@@ -8,8 +8,8 @@ standard VSM/DSM-style output that can be assembled by the PS2 toolchain.
 [ps2dev/openvcl](https://github.com/ps2dev/openvcl) at commit
 `a5867c3daf03828806ee966aca4116622da3f671` (v0.4.0) and maintained for
 [TyraX](https://github.com/doctorspider42/tyra-editor), a PlayStation 2 game
-editor. It adds seventeen options to upstream, all of them off by default, and
-one unconditional correctness fix. With all seventeen on, the fork assembles
+editor. It adds nineteen options to upstream, all of them off by default, and
+one unconditional correctness fix. With all nineteen on, the fork assembles
 TyraX's entire VU corpus in less micro memory than Sony's `vcl` needs for the
 same programs.
 
@@ -38,9 +38,9 @@ reference:
 
 | | Sony `vcl` | this fork | |
 |---|---:|---:|---|
-| engine resident VU1 set | 2028 words | **1988** | ceiling is 2042; upstream did not fit |
-| generated corpus, 45 programs | 9264 words | **9308** | +0.47%; smaller in 17, larger in 24, equal in 4 |
-| real (non-`nop`) pipe slots, 45 programs | 10910 | **10864** | fewer |
+| engine resident VU1 set | 2028 words | **1986** | ceiling is 2042; upstream did not fit at all |
+| engine corpus, all 25 programs | 3982 words | **3976** | under Sony |
+| generated corpus, 45 programs | 9264 words | **9286** | +0.24% |
 | programs that compile | 45 / 45 | **45 / 45** | upstream at the fork point: 23 |
 
 The rendered frame is pixel-identical to a Sony-`vcl` build in PCSX2, and the
@@ -48,7 +48,7 @@ GIF packet VU1 stages on a sampled flush is identical across the whole dump bar
 the microprogram entry address. Upstream's own test suite — 419 tests, 4465
 assertions — passes unmodified.
 
-## The seventeen options
+## The nineteen options
 
 Every one is off by default and each was added to close a measured gap, in this
 order.
@@ -130,20 +130,58 @@ loads, branches, anything with a delay slot, and any token carrying a label are
 never candidates. The pass iterates to a fixed point: deleting
 `add.z k0, vf00, i` is what makes the `loi` above it dead.
 
+**The CLIP window — two flags**
+
+| flag | effect |
+|---|---|
+| `--exempt-full-clip-masks` | let the scheduler apply the same full-window mask test the emitter already applies, instead of holding every clip reader four cycles behind its `clip` regardless of mask |
+| `--clip-exemption-best-of` | schedule the whole program both ways and keep the fewer words, ties going to "off" |
+
+The first closes a contradiction inside this compiler.
+`CodeGenerator::clipReadIsPositional` exempts masks covering the whole window
+(`0x3FFFF`, `0xFFFFFF`) because "is anything outside" gets the same answer from
+any position, while `VuLatencyTracker` padded every reader under a bare
+`if( readsClip )`. The scheduler runs first and is the stricter of the two, so
+the emitter's exemption could never pay. Sony's `vcl` agrees with the emitter —
+in one program it issues `clipw.xyz VF14xyz,VF14w | fcand VI01,262143` as a
+single row.
+
+The second exists because the first is not free. Freeing a reader reshuffles the
+list schedule downstream, and two programs came out a row worse while a third
+came out a row better — two words, and scheduling noise rather than the rule.
+Best-of is **per program, not per segment**, deliberately: freeing a reader can
+never lengthen the segment it sits in, so a per-segment best-of would take the
+exemption nearly everywhere and score itself a guaranteed win while the rows it
+costs land in a later segment.
+
+The safety property is measured over all 234 clip readers in 70 programs: **no
+positional reader moves at all**, while 29 of the 78 full-window readers move
+adjacent to their `clip`. The cost is compile time — 26 programs hold a
+full-window reader and are scheduled twice, the other 44 are skipped by a
+token-list predicate because with no such reader the second schedule is provably
+the first. About +7%.
+
 ## Known limits
 
-**The remaining 44 words are one shape.** With the dead code gone this fork
-emits fewer real operations than Sony's (10864 against 10910) in more rows (9283
-against 9240), and every one of the 43 extra rows is `nop nop` padding in front
-of a CLIP reader. Sony runs two or three `clip`s ahead of their readers; this
-fork issues one, waits out its window, reads it, then issues the next. The cause
-is that neither the scheduler nor the emitter models the CLIP register as the
-24-bit shift register it is — four entries of six bits. They model "a `clip`
-happened N rows ago", under which a second `clip` in flight is indistinguishable
-from clobbering the first, so refusing it is the only safe answer. Overlapping
-the chains means threading which entry each mask selects, and how many pushes
-have happened since, through the dependency graph, the pair test, the latency
-tracker and `emittedRowsSinceClipWrite`.
+**The remaining 22 words are one shape, and it is not worth chasing.** This fork
+emits fewer real operations than Sony's in more rows, and every extra row is
+`nop nop` padding in front of a CLIP reader. Sony runs two or three `clip`s
+ahead of their readers; this fork issues one, waits out its window, reads it,
+then issues the next. The cause is that neither the scheduler nor the emitter
+models the CLIP register as the 24-bit shift register it is — four entries of
+six bits. They model "a `clip` happened N rows ago", under which a second `clip`
+in flight is indistinguishable from clobbering the first, so refusing it is the
+only safe answer. Overlapping the chains means threading which entry each mask
+selects, and how many pushes have happened since, through the dependency graph,
+the pair test, the latency tracker and `emittedRowsSinceClipWrite`.
+
+That is a redesign in the part of this compiler with the worst defect record,
+and the measurement says it would buy nothing. Every extra padding row sits in a
+**per-primitive** loop; not one is in the per-edge loop of the Sutherland-
+Hodgman clip test, and in that loop — the only genuinely hot one — **both
+assemblers pad identically**. Weighted by loop nesting the remaining words come
+out *negative*: this fork pays about 4.7 cycles per triangle for clip padding
+and takes back 8–9 in the fan emitter it schedules better.
 
 **The loop-liveness bail-out has no minimal reproducer.** Without
 `--loop-liveness-always`, three of five `as_is_*` programs clobber a register
@@ -262,11 +300,13 @@ Useful options:
 | `--enable-generic-software-pipelining` | enable safe generic software-pipeline rewrites, currently the default |
 | `--disable-generic-software-pipelining` | disable generic software-pipeline rewrites for comparison/debugging |
 | `--strict-schedule-slots` | emit from the typed scheduler slot model without legacy lookahead pairing |
+| `--exempt-full-clip-masks` | let the scheduler apply the emitter's full-window CLIP-mask test instead of padding every clip reader |
+| `--clip-exemption-best-of` | schedule the program with and without that exemption and keep the fewer words |
 
 `-M`, `-P`, and `-Z` are accepted for VCL command-line compatibility.
 
-The seventeen density, register-allocation and dead-code options this fork adds
-are listed above, under *The seventeen options*.
+The nineteen density, register-allocation, dead-code and CLIP options this fork
+adds are listed above, under *The nineteen options*.
 
 ## VSM Cost Analysis
 

@@ -1678,26 +1678,11 @@ unsigned int CodeGenerator::emittedRowsSinceClipWrite() const
 
 bool CodeGenerator::clipReadIsPositional( const Token& token ) const
 {
-	// A flag reader carries the mask it tests as an immediate. Full-window masks
-	// (all 24 bits, or the 18 that three vertices occupy) do not care which position
-	// the bits sit in; anything narrower does.
-	for( std::list<Token::Argument>::const_iterator a = token.arguments().begin();
-	     a != token.arguments().end(); ++a )
-	{
-		if( a->type() != Token::Argument::IMMEDIATE )
-			continue;
-		const std::string& text = a->immediate();
-		if( text.empty() )
-			continue;
-		const unsigned long mask = std::strtoul( text.c_str(), NULL, 0 );
-		// Only the whole-window masks are safe to read adjacent to their CLIP: they
-		// ask "is anything outside" and every entry answers the same way. A mask
-		// that names particular entries - one bit, or several entries OR-ed - is
-		// reading positions, and a position that has not arrived yet is a different
-		// vertex's answer.
-		return mask != 0 && mask != 0x3FFFFul && mask != 0xFFFFFFul;
-	}
-	return true;      // no mask to judge by: assume it matters
+	// The mask test itself is vuClipReadIsFullWindow(), in VuSchedulingRules, because
+	// the scheduler needs the same answer - see --exempt-full-clip-masks. It used to
+	// live here alone, and the scheduler disagreeing with it is exactly the bug that
+	// moved it.
+	return !vuClipReadIsFullWindow( token );
 }
 
 void CodeGenerator::padForClipFlagWindow( const Token& a, const Token* b )
@@ -1721,10 +1706,22 @@ void CodeGenerator::padForClipFlagWindow( const Token& a, const Token* b )
 			// Only a POSITIONAL read has to wait. The window holds six bits per CLIP,
 			// so a mask that covers the whole thing ("is anything outside", 0x3FFFF
 			// for three vertices) gets the same answer whichever position the bits
-			// are in - and SCE reads those adjacent to their CLIP, five times over
-			// these programs, while never putting a positional read below three rows.
-			// Padding the full-window ones is pure loss: it costs this engine's five
-			// cull programs 22 instructions and changes nothing they compute.
+			// are in, and SCE reads those adjacent to their CLIP. Padding them is
+			// pure loss: it costs this engine's five cull programs 22 instructions
+			// and changes nothing they compute.
+			//
+			// What this does NOT claim is that SCE keeps its distance for positional
+			// reads. Measured over 70 programs, SCE puts 89 positional readers closer
+			// than three rows to the nearest preceding CLIP: five in each of the
+			// sixteen `_cl` programs (masks 15 and 10), three in each of the two
+			// billboards (mask 63, one of them in the row directly below), and one in
+			// each of three stapip_clip_* . SCE can, because it pairs a reader with the CLIP
+			// four rows back rather than the nearest one: it models the register as
+			// the 24-bit shift window it is, and keeps two or three CLIPs in flight.
+			// We do not model that, so the distance from the nearest one is the only
+			// safe reading of the window we have, and for a positional mask we keep
+			// it. An earlier version of this comment asserted SCE never went below
+			// three rows; it was not measured, and it is false.
 			if( clipReadIsPositional( *pair[k] ) )
 				readsClip = true;
 		}
@@ -2259,9 +2256,66 @@ void CodeGenerator::emitStrictScheduledPadding( const VuScheduledIssueSlot& slot
 	}
 }
 
+// Puts the build-wide --exempt-full-clip-masks setting back when the emission of one
+// program is over, so a source file holding two programs does not inherit the arm the
+// first one happened to win with.
+namespace
+{
+	struct VuClipExemptionScope
+	{
+		explicit VuClipExemptionScope( bool restore ) : m_restore( restore ) {}
+		~VuClipExemptionScope() { setVuExemptFullClipMasksEnabled( m_restore ); }
+
+	private:
+		bool m_restore;
+	};
+}
+
+// --clip-exemption-best-of. Both arms are legal schedules of the same token list -
+// the exemption only ever removes a constraint the emitter does not impose either -
+// so the choice between them is pure size, and it is made here, once per program,
+// against the word count the whole program will emit.
+//
+// Not against the segment's: freeing a reader cannot lengthen the segment it sits in,
+// so a per-segment comparison would take the exemption almost everywhere and call it
+// a win, while the rows it costs land further down. stapip_cull_d and stapip_cull_td
+// are exactly that case.
+//
+// The winning arm is left in force for the emission that follows: CodeGenerator's own
+// m_latencyTracker asks the same question again while it pairs and pads, and it has
+// to get the answer the schedule was built with.
+static VuScheduledProgram scheduleProgramChoosingClipExemption( const std::list<Token>& tokens )
+{
+	if( !vuClipExemptionBestOfEnabled() || !vuTokenListHasFullWindowClipReader( tokens ) )
+		return scheduleVuProgramReadyIssueSlotsWithFlagLiveness( tokens );
+
+	setVuExemptFullClipMasksEnabled( false );
+	VuScheduledProgram withoutExemption = scheduleVuProgramReadyIssueSlotsWithFlagLiveness( tokens );
+	const unsigned int withoutWords = vuScheduledProgramEmittedWordCount( withoutExemption );
+
+	setVuExemptFullClipMasksEnabled( true );
+	VuScheduledProgram withExemption = scheduleVuProgramReadyIssueSlotsWithFlagLiveness( tokens );
+	const unsigned int withWords = vuScheduledProgramEmittedWordCount( withExemption );
+
+	if( vuShowPairMissesEnabled() )
+		std::cerr << "[clipexempt] off=" << withoutWords
+		          << " on=" << withWords
+		          << " keep=" << ( withWords < withoutWords ? "on" : "off" ) << std::endl;
+
+	// Ties go to "off": a program the exemption does not shorten keeps the schedule it
+	// would have had without the flag, so the flag can only ever be read as a win.
+	if( withWords < withoutWords )
+		return withExemption;
+
+	setVuExemptFullClipMasksEnabled( false );
+	return withoutExemption;
+}
+
 bool CodeGenerator::emitStrictScheduledProgram( const std::list<Token>& tokens, bool& exitWritten )
 {
-	VuScheduledProgram program = scheduleVuProgramReadyIssueSlotsWithFlagLiveness(tokens);
+	const bool exemptionOnEntry = vuExemptFullClipMasksEnabled();
+	VuScheduledProgram program = scheduleProgramChoosingClipExemption(tokens);
+	const VuClipExemptionScope exemptionScope( exemptionOnEntry );
 	std::vector<const VuScheduledIssueSlot*> slots;
 	for( std::vector<VuScheduledBasicBlock>::const_iterator block = program.blocks.begin();
 	     block != program.blocks.end();

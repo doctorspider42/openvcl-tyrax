@@ -6483,6 +6483,15 @@ VuScheduledProgram scheduleVuProgramReadyIssueSlotsWithFlagLiveness( const std::
 	return scheduleVuProgramReadyIssueSlotsWithFlagLivenessInternal( tokens, true );
 }
 
+unsigned int vuScheduledProgramEmittedWordCount( const VuScheduledProgram& program )
+{
+	unsigned int words = 0;
+	for( std::vector<VuScheduledBasicBlock>::const_iterator block = program.blocks.begin();
+	     block != program.blocks.end(); ++block )
+		words += issueSlotEmittedWordCount( block->issueSlots );
+	return words;
+}
+
 std::list<Token> flattenVuScheduledProgramTokens( const VuScheduledProgram& program )
 {
 	std::list<Token> scheduled;

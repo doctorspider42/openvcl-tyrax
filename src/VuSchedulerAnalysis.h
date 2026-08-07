@@ -540,6 +540,13 @@ std::vector< std::vector<VuScheduledIssueSlot> > scheduleVuBasicBlocksReadyIssue
     const std::list<Token>& tokens );
 VuScheduledProgram scheduleVuProgramReadyIssueSlotsWithFlagLiveness( const std::list<Token>& tokens );
 std::list<Token> flattenVuScheduledProgramTokens( const VuScheduledProgram& program );
+
+// Instruction words this schedule will cost in micro memory: one per issue slot,
+// except a multi-cycle padding slot, which costs only the nops the emitter actually
+// writes for it (the FMAC interlock resolves the rest on the hardware). NOT the same
+// number as VuScheduledProgram::cycleCount, and the only one a size comparison
+// between two schedules of the same program may use.
+unsigned int vuScheduledProgramEmittedWordCount( const VuScheduledProgram& program );
 unsigned int vuIgnoredFlagWawResourcesForRemaining( std::list<Token>::const_iterator begin,
                                                     std::list<Token>::const_iterator end );
 VuScheduledPaddingKind vuScheduledPaddingKindForReadHazard( const Token& token,

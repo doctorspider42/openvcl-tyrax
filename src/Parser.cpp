@@ -2068,6 +2068,8 @@ bool Parser::tokenize()
 	setVuSinkLoadsIntoLoopsEnabled( m_cmdLine.sinkLoadsIntoLoops() );
 	setVuSinkLoadsPastBranchesEnabled( m_cmdLine.sinkLoadsPastBranches() );
 	setVuDropDeadWritesEnabled( m_cmdLine.dropDeadWrites() );
+	setVuExemptFullClipMasksEnabled( m_cmdLine.exemptFullClipMasks() );
+	setVuClipExemptionBestOfEnabled( m_cmdLine.clipExemptionBestOf() );
 	setVuShowPairMissesEnabled( m_cmdLine.showPairMisses() );
 	setVuPairBestOfTwoEnabled( m_cmdLine.pairBestOfTwo() );
 	setVuPairBestOfManyEnabled( m_cmdLine.pairBestOfMany() );

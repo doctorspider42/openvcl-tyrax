@@ -70,6 +70,8 @@ public:
 	bool sinkLoadsIntoLoops() const;
 	bool sinkLoadsPastBranches() const;
 	bool dropDeadWrites() const;
+	bool exemptFullClipMasks() const;
+	bool clipExemptionBestOf() const;
 	bool showPairMisses() const;
 	bool pairBestOfTwo() const;
 	bool pairBestOfMany() const;
@@ -162,6 +164,8 @@ private:
 		SINK_LOADS_INTO_LOOPS,
 		SINK_LOADS_PAST_BRANCHES,
 		DROP_DEAD_WRITES,
+		EXEMPT_FULL_CLIP_MASKS,
+		CLIP_EXEMPTION_BEST_OF,
 		SHOW_PAIR_MISSES,
 		PAIR_BEST_OF_TWO,
 		PAIR_BEST_OF_MANY,
@@ -235,6 +239,8 @@ private:
 	bool m_sinkLoadsIntoLoops;
 	bool m_sinkLoadsPastBranches;
 	bool m_dropDeadWrites;
+	bool m_exemptFullClipMasks;
+	bool m_clipExemptionBestOf;
 	bool m_showPairMisses;
 	bool m_pairBestOfTwo;
 	bool m_pairBestOfMany;

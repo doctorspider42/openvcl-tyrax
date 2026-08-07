@@ -26,6 +26,21 @@ namespace
 		    && (access.implicitWrites & resource) != 0;
 	}
 
+	// Does this token read the CLIP flag in a way that has to wait for its own six
+	// bits to arrive? The emitter has always asked the narrower question - a mask
+	// covering the whole window answers the same from any position, so it does not -
+	// and the scheduler did not ask it at all, which made the scheduler the binding
+	// constraint and left the emitter's exemption unreachable. --exempt-full-clip-masks
+	// brings the two into line; with it off this is the bare readsClip it used to be.
+	bool tokenReadsClipPositionally( const Token& token )
+	{
+		if( !tokenReadsImplicitResource( token, VU_RESOURCE_CLIP ) )
+			return false;
+		if( vuExemptFullClipMasksEnabled() && vuClipReadIsFullWindow( token ) )
+			return false;
+		return true;
+	}
+
 	int bypassLatencyReduction( const std::string& mnemonic, int fallback )
 	{
 		const VuInstructionInfo* info = findVuInstructionInfo( mnemonic );
@@ -168,11 +183,11 @@ int VuLatencyTracker::readHazardDelayImpl( const Token& token,
 
 	const int flagCycle = currentCycle + needed;
 	bool readsMac = tokenReadsImplicitResource( token, VU_RESOURCE_MAC );
-	bool readsClip = tokenReadsImplicitResource( token, VU_RESOURCE_CLIP );
+	bool readsClip = tokenReadsClipPositionally( token );
 	if( partner && partner->operand() )
 	{
 		readsMac = readsMac || tokenReadsImplicitResource( *partner, VU_RESOURCE_MAC );
-		readsClip = readsClip || tokenReadsImplicitResource( *partner, VU_RESOURCE_CLIP );
+		readsClip = readsClip || tokenReadsClipPositionally( *partner );
 	}
 
 	// How long after its producer a flag may be read. 4 by default;

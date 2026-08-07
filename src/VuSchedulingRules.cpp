@@ -6,6 +6,7 @@
 #include "VuInstructionInfo.h"
 #include "VuTokenResourceAccess.h"
 
+#include <cstdlib>
 #include <sstream>
 
 namespace vcl
@@ -576,6 +577,8 @@ namespace
 	unsigned int g_flagVisibilityLatency = 4;
 	unsigned int g_clipFlagVisibilityLatency = 4;
 	unsigned int g_clipFlagSchedulingLatency = 4;
+	bool g_exemptFullClipMasks = false;
+	bool g_clipExemptionBestOf = false;
 	unsigned int g_integerLoadReadyCycles = 0;
 	bool g_emitDelayFillers = false;
 	bool g_branchInterlock = false;
@@ -656,6 +659,79 @@ void setVuClipFlagSchedulingLatency( unsigned int cycles )
 unsigned int vuClipFlagSchedulingLatency()
 {
 	return g_clipFlagSchedulingLatency;
+}
+
+bool vuClipReadIsFullWindow( const Token& token )
+{
+	// The mask is the reader's immediate argument. Only the whole-window values are
+	// position-independent: 0x3FFFF is the eighteen bits three vertices occupy and
+	// 0xFFFFFF the whole register, and both mean "is anything outside". A mask that
+	// names particular entries - one bit, or several OR-ed - is reading positions.
+	//
+	// An fcget takes no mask at all; it copies the register, so every position of it
+	// matters and it is never full-window by this test (the loop below finds no
+	// immediate and falls through to false).
+	for( std::list<Token::Argument>::const_iterator a = token.arguments().begin();
+	     a != token.arguments().end(); ++a )
+	{
+		if( a->type() != Token::Argument::IMMEDIATE )
+			continue;
+		const std::string& text = a->immediate();
+		if( text.empty() )
+			continue;
+		const unsigned long mask = std::strtoul( text.c_str(), NULL, 0 );
+		return mask == 0 || mask == 0x3FFFFul || mask == 0xFFFFFFul;
+	}
+	return false;      // no mask to judge by: assume the position matters
+}
+
+// --exempt-full-clip-masks. The emitter has exempted full-window reads from clip
+// padding since padForClipFlagWindow was written; the scheduler never did, and held
+// every reader vuClipFlagSchedulingLatency() cycles behind its CLIP regardless of
+// mask. The scheduler being the more conservative of the two means the emitter's
+// exemption could not pay: the reader had already been pushed away.
+void setVuExemptFullClipMasksEnabled( bool enabled )
+{
+	g_exemptFullClipMasks = enabled;
+}
+
+bool vuExemptFullClipMasksEnabled()
+{
+	return g_exemptFullClipMasks;
+}
+
+// --clip-exemption-best-of. Taking the exemption is not free downstream: the freed
+// reader issues early, the list scheduler then sees a different ready set for every
+// row after it, and on two of the ten resident programs that came out one row worse
+// even though the reader's own segment did not. Rather than argue about which way is
+// right, schedule the whole program both ways and keep the shorter one.
+void setVuClipExemptionBestOfEnabled( bool enabled )
+{
+	g_clipExemptionBestOf = enabled;
+}
+
+bool vuClipExemptionBestOfEnabled()
+{
+	return g_clipExemptionBestOf;
+}
+
+bool vuTokenListHasFullWindowClipReader( const std::list<Token>& tokens )
+{
+	// The two arms of the best-of differ only where a full-window CLIP reader exists;
+	// with none in the program the second schedule is provably the first one, so it is
+	// not worth its compile time. 44 of the 70 programs this fork compiles take this
+	// exit; the other 26 pay for a second pass and 10 of them keep its result.
+	for( std::list<Token>::const_iterator i = tokens.begin(); i != tokens.end(); ++i )
+	{
+		VuTokenResourceAccess access;
+		if( !buildVuTokenResourceAccess( *i, access ) )
+			continue;
+		if( (access.implicitReads & VU_RESOURCE_CLIP) == 0 )
+			continue;
+		if( vuClipReadIsFullWindow( *i ) )
+			return true;
+	}
+	return false;
 }
 
 void setVuIntegerLoadReadyCycles( unsigned int cycles )

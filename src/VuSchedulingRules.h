@@ -80,6 +80,45 @@ unsigned int vuClipFlagVisibilityLatency();
 void setVuClipFlagSchedulingLatency( unsigned int cycles );
 unsigned int vuClipFlagSchedulingLatency();
 
+// Does this CLIP-flag reader test the window as a whole? A reader carries the mask
+// it tests as an immediate; the full-window masks - all 24 bits, or the 18 that
+// three vertices occupy - ask "is anything outside" and every window position
+// answers the same, so such a read does not depend on its own six bits having
+// arrived. Anything narrower names particular entries and does.
+//
+// This lives here rather than in the emitter because BOTH the emitter
+// (CodeGenerator::padForClipFlagWindow) and the scheduler (VuLatencyTracker) have
+// to agree on it, and they did not: the emitter exempted full-window reads while
+// the scheduler kept them four cycles from their CLIP, so the scheduler's caution
+// was the binding one. Two copies of this test is how that happens again.
+bool vuClipReadIsFullWindow( const Token& token );
+
+// --exempt-full-clip-masks: let the SCHEDULER make the same exemption. Off by
+// default; with it on, a full-window reader no longer waits
+// vuClipFlagSchedulingLatency() cycles behind its CLIP. Positional reads are
+// untouched - those are the ones a Sutherland-Hodgman edge loop makes, and reading
+// one early returns a different vertex's answer under the same mask.
+void setVuExemptFullClipMasksEnabled( bool enabled );
+bool vuExemptFullClipMasksEnabled();
+
+// --clip-exemption-best-of: do not decide the question above once for the whole
+// build. Schedule each PROGRAM twice - exemption off, exemption on - and keep
+// whichever emits fewer instruction words, ties going to "off" so a program that
+// gains nothing keeps the output it had.
+//
+// Whole program, not per segment, on purpose. Freeing a reader shortens the segment
+// it sits in or leaves it the same length, never lengthens it, so a per-segment
+// best-of would look like a guaranteed win; what it would miss is that the schedule
+// downstream of the freed reader is different too, and on stapip_cull_d and
+// stapip_cull_td that downstream costs a row. Only a whole-program count sees it.
+void setVuClipExemptionBestOfEnabled( bool enabled );
+bool vuClipExemptionBestOfEnabled();
+
+// Is there anything in this program for the exemption to act on? Without a
+// full-window CLIP reader the two arms of the best-of are the same schedule, and the
+// second one is pure compile time.
+bool vuTokenListHasFullWindowClipReader( const std::list<Token>& tokens );
+
 // Cycles after which a memory load's destination may be read, or 0 to keep the
 // instruction table's latency+1. --sce-latencies sets 3 (see VuLatencyTracker).
 void setVuIntegerLoadReadyCycles( unsigned int cycles );
