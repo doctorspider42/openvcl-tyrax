@@ -8,10 +8,10 @@ standard VSM/DSM-style output that can be assembled by the PS2 toolchain.
 [ps2dev/openvcl](https://github.com/ps2dev/openvcl) at commit
 `a5867c3daf03828806ee966aca4116622da3f671` (v0.4.0) and maintained for
 [TyraX](https://github.com/doctorspider42/tyra-editor), a PlayStation 2 game
-editor. It adds seventeen options to upstream, all of them off by default:
-with none of them passed the output is byte-identical to upstream's, and with
-all of them the fork assembles TyraX's entire VU corpus in less micro memory
-than Sony's `vcl` needs for the same programs.
+editor. It adds seventeen options to upstream, all of them off by default, and
+one unconditional correctness fix. With all seventeen on, the fork assembles
+TyraX's entire VU corpus in less micro memory than Sony's `vcl` needs for the
+same programs.
 
 Upstream has not seen or accepted these changes. Report problems here, not to
 ps2dev. Licence is unchanged: **Academic Free License v2.0**, see
@@ -53,12 +53,16 @@ assertions — passes unmodified.
 Every one is off by default and each was added to close a measured gap, in this
 order.
 
-**Correctness (no flag, always on)**
+**Correctness — no flag, always on**
 
 `CLIPw` with an implied `w` component is accepted instead of rejected. Upstream
 rejects the operand *and still writes a complete output file*, with the `clipw`
 missing and the `fcand` that reads its clip flags kept — silently emitting a
 program that tests clip flags nobody set.
+
+This one is unconditional on purpose, so it is the one place where this fork's
+output differs from upstream's with no flags passed. A silent miscompile is not
+something to put behind an opt-in.
 
 **Density — ten flags**
 
