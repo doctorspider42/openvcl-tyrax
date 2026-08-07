@@ -1,28 +1,177 @@
-# OpenVCL
+# OpenVCL — TyraX fork
 
 OpenVCL is a free VCL preprocessor for PlayStation 2 VU programs. It reads
 VCL-style source, performs register allocation and scheduling, and emits
 standard VSM/DSM-style output that can be assembled by the PS2 toolchain.
 
-The project was originally written by Jesper Svennevid and Daniel Collin.
-This repository is currently being modernized around ps2gl compatibility,
-correct VU scheduling, and measurable VSM cost analysis.
+**This is a modified copy of OpenVCL**, forked from
+[ps2dev/openvcl](https://github.com/ps2dev/openvcl) at commit
+`a5867c3daf03828806ee966aca4116622da3f671` (v0.4.0) and maintained for
+[TyraX](https://github.com/doctorspider42/tyra-editor), a PlayStation 2 game
+editor. It adds seventeen options to upstream, all of them off by default:
+with none of them passed the output is byte-identical to upstream's, and with
+all of them the fork assembles TyraX's entire VU corpus in less micro memory
+than Sony's `vcl` needs for the same programs.
 
-Francisco Javier Trujillo Mata is the current main contributor and maintainer,
-recovering and extending the project after a long period without active
-development.
+Upstream has not seen or accepted these changes. Report problems here, not to
+ps2dev. Licence is unchanged: **Academic Free License v2.0**, see
+[`LICENSE`](LICENSE).
 
-## License
+## Why it exists
 
-OpenVCL is licensed under AFL v2.0. See [LICENSE](LICENSE).
+TyraX compiles a PS2 engine's VU1 and VU0 microprograms, and the standard tool
+for that job is Sony's `vcl` — VCL 1.4beta7, Sony Computer Entertainment
+America © 2001. It ships with no licence at all, which makes a publishable
+toolchain container image impossible: distributing the image distributes the
+binary. Every other tool in that image has a licence that permits it.
 
-## Background
+OpenVCL is the only free assembler for this job, and at the fork point it could
+not do it: it miscompiled one program silently, ran out of registers on
+twenty-two others, and the programs it did compile were too big to fit VU1's
+micro memory. Closing that gap is what this fork is.
+
+## What it buys
+
+Measured over TyraX's two corpora — the engine's 25 hand-written microprograms
+and the 45 its VU authoring layer generates — with Sony's `vcl` as the
+reference:
+
+| | Sony `vcl` | this fork | |
+|---|---:|---:|---|
+| engine resident VU1 set | 2028 words | **1988** | ceiling is 2042; upstream did not fit |
+| generated corpus, 45 programs | 9264 words | **9308** | +0.47%; smaller in 17, larger in 24, equal in 4 |
+| real (non-`nop`) pipe slots, 45 programs | 10910 | **10864** | fewer |
+| programs that compile | 45 / 45 | **45 / 45** | upstream at the fork point: 23 |
+
+The rendered frame is pixel-identical to a Sony-`vcl` build in PCSX2, and the
+GIF packet VU1 stages on a sampled flush is identical across the whole dump bar
+the microprogram entry address. Upstream's own test suite — 419 tests, 4465
+assertions — passes unmodified.
+
+## The seventeen options
+
+Every one is off by default and each was added to close a measured gap, in this
+order.
+
+**Correctness (no flag, always on)**
+
+`CLIPw` with an implied `w` component is accepted instead of rejected. Upstream
+rejects the operand *and still writes a complete output file*, with the `clipw`
+missing and the `fcand` that reads its clip flags kept — silently emitting a
+program that tests clip flags nobody set.
+
+**Density — ten flags**
+
+| flag | effect |
+|---|---|
+| `--schedule-flag-readers` | MAC/CLIP flag readers take part in list scheduling instead of ending the segment |
+| `--fmac-interlock` | a VF-to-VF wait costs cycles, not emitted `nop` words — the FMAC pipeline interlocks |
+| `--sce-latencies` | flag visibility 4 → 1 cycle; an integer load's result readable at issue+3 |
+| `--emit-delay-fillers` | offer the instruction scheduled before a branch as its delay-slot filler |
+| `--branch-interlock` | no padding word before a branch whose operand came from a load or a flag reader |
+| `--branch-bubble-on-dependency` | emit the pre-branch bubble only when the row above actually produces one of the branch's operands |
+| `--loop-liveness-always` | never skip extending a live range across a loop's back edge |
+| `--upper-move-with-w` | promote a full-width `move` into the upper pipe, where it can pair |
+| `--pair-best-of-two` | schedule each segment both ways and keep the shorter |
+| `--pair-best-of-many` | schedule each segment under seven ready-list heuristics and keep the shortest |
+
+Every latency constant is calibrated against the minimum distances Sony's `vcl`
+demonstrates in its own output — black-box observation of a known-good
+reference. No binary was disassembled.
+
+**Register allocation — six flags**
+
+The density flags make the code smaller; these make it fit. TyraX's authoring
+layer generates 45 microprograms; at the fork point this compiler managed 23,
+every failure being *Register allocation ran out of registers*.
+
+| flag | effect |
+|---|---|
+| `--trim-uncarried-ranges` | rebuild a live range from the alias's own accesses, when the value provably dies at its last use inside one iteration |
+| `--coalesce-float-writes` | give a float write the register its own previous value already sits in, when that value is dead from the write on |
+| `--sink-loads` | move a load down the token list to just before the value it loads is first read, and re-derive the allocator's timeline from list position |
+| `--sink-loads-across-stores` | let a sinking load pass a store through a *different* base register — an aliasing assumption, and the one Sony's `vcl` makes in its own output |
+| `--sink-loads-into-loops` | let a sinking load pass one loop header, so a preamble load whose only readers are inside the batch loop stops pinning a register across the whole program |
+| `--sink-loads-past-branches` | let a sinking load cross a branch to a point every path out of its old position reaches |
+
+`--sink-loads-past-branches` is not applied speculatively. Carrying a load over
+a branch reorders the block it lands in, and over the 45 programs that was worth
+about two words in either direction where registers were not scarce. So
+allocation runs first exactly as it would with the flag off, and the flag only
+gets its turn when that runs out of registers. All 44 programs that compiled
+without it are byte-identical with it on.
+
+**Dead code — one flag**
+
+| flag | effect |
+|---|---|
+| `--drop-dead-writes` | delete a token whose register destination is read nowhere in the program, field by field, and whose MAC/CLIP/I/Q/P/R/ACC writes nothing observes either |
+
+The twelve flags above made the generated programs fit and made them dense, and
+they were still 242 words bigger than Sony's. Counting rows said nothing — both
+compilers fit 1.18 real operations in a row — but counting opcodes did: this
+copy emitted 312 instructions Sony's `vcl` never emits, led by 93 `loi` and 65
+`lq`. They are dead. A VU authoring layer emits a whole four-component constant
+vector when the body reads two components, and an `lq` for every quadword a
+description names whether the body touches it or not. Sony's `vcl` deletes both.
+
+The liveness in it is the weakest one that finds them: a value is live if *any*
+token anywhere reads that component, with no control flow in the analysis at
+all. Nothing here deletes a write that is dead on one path and live on another.
+Only aliases are candidates — a literal `VF05` an author named by number may be
+an interface with something this compiler cannot see. Names any
+`in_vf`/`out_vf`/`--exitm` directive mentions are live by declaration, as are
+hardware resources any `out_hw_*` names. Stores, `xgkick`, auto-incrementing
+loads, branches, anything with a delay slot, and any token carrying a label are
+never candidates. The pass iterates to a fixed point: deleting
+`add.z k0, vf00, i` is what makes the `loi` above it dead.
+
+## Known limits
+
+**The remaining 44 words are one shape.** With the dead code gone this fork
+emits fewer real operations than Sony's (10864 against 10910) in more rows (9283
+against 9240), and every one of the 43 extra rows is `nop nop` padding in front
+of a CLIP reader. Sony runs two or three `clip`s ahead of their readers; this
+fork issues one, waits out its window, reads it, then issues the next. The cause
+is that neither the scheduler nor the emitter models the CLIP register as the
+24-bit shift register it is — four entries of six bits. They model "a `clip`
+happened N rows ago", under which a second `clip` in flight is indistinguishable
+from clobbering the first, so refusing it is the only safe answer. Overlapping
+the chains means threading which entry each mask selects, and how many pushes
+have happened since, through the dependency graph, the pair test, the latency
+tracker and `emittedRowsSinceClipWrite`.
+
+**The loop-liveness bail-out has no minimal reproducer.** Without
+`--loop-liveness-always`, three of five `as_is_*` programs clobber a register
+carried across a loop's back edge. The guard responsible is visible in
+`extendLoopDirectiveRange` — the range extension is all-or-nothing and returns
+early when the set would not fit — but four hand-built reproducers failed to
+make it fire: pool pressure refuses cleanly instead. Every program that does
+trip it has an inner loop, so the extension running twice over nested ranges is
+the untried hypothesis. Worth closing, because a fix nobody can demonstrate in
+ten lines is not one upstream can take.
+
+## Upstream and attribution
+
+* Project: **OpenVCL** — <https://github.com/ps2dev/openvcl>
+* Forked at `a5867c3daf03828806ee966aca4116622da3f671` (v0.4.0)
+* Originally written by **Jesper Svennevid** and **Daniel Collin**
+* Current upstream maintainer: **Francisco Javier Trujillo Mata**
+* Licence: **Academic Free License v2.0** — see [`LICENSE`](LICENSE), unchanged
+
+Those names are recorded as attribution, which section 6 (*Attribution Rights*)
+of the AFL v2.0 requires along with the notice above that the Original Work has
+been modified. Per section 4 (*Exclusions From License Grant*) they do not
+endorse this copy.
 
 OpenVCL has been built from public VCL documentation and VCL source examples.
-No proprietary binary has been reverse engineered.
+No proprietary binary has been reverse engineered. VU Command Line is a
+trademark of Sony Computer Entertainment; VCL is the abbreviated name for VU
+Command Line.
 
-VU Command Line is a trademark of Sony Computer Entertainment. VCL is the
-abbreviated name for VU Command Line.
+---
+
+# Using it
 
 ## Build
 
@@ -106,32 +255,14 @@ Useful options:
 | `--dump-instruction-info-json` | print the VU instruction metadata table as JSON |
 | `--dump-schedule-info` | print generic ready-scheduler issue slots |
 | `--dump-schedule-info-json` | print generic ready-scheduler issue slots as JSON |
-| `--schedule-flag-readers` | MAC/CLIP flag readers take part in list scheduling instead of ending the segment |
-| `--fmac-interlock` | a VF-to-VF wait costs cycles, not emitted `nop` words — the FMAC pipeline interlocks |
-| `--sce-latencies` | flag visibility 4 → 1 cycle; an integer load's result readable at issue+3 |
-| `--emit-delay-fillers` | offer the instruction scheduled before a branch as its delay-slot filler |
-| `--branch-interlock` | no padding word before a branch whose operand came from a load or a flag reader |
-| `--branch-bubble-on-dependency` | emit the pre-branch bubble only when the row above actually produces one of the branch's operands |
-| `--loop-liveness-always` | never skip extending a live range across a loop's back edge |
-| `--upper-move-with-w` | promote a full-width `move` into the upper pipe, where it can pair |
-| `--pair-best-of-two` | schedule each segment both ways and keep the shorter |
-| `--pair-best-of-many` | schedule each segment under seven ready-list heuristics and keep the shortest |
-| `--trim-uncarried-ranges` | rebuild a live range from the alias's own accesses, when the value provably dies at its last use inside one iteration |
-| `--coalesce-float-writes` | give a float write the register its own previous value already sits in, when that value is dead from the write on |
-| `--sink-loads` | move a load down the token list to just before the value it loads is first read, and re-derive the allocator's timeline from list position |
-| `--sink-loads-across-stores` | let a sinking load pass a store through a *different* base register — an aliasing assumption, and the one SCE's `vcl` makes in its own output |
-| `--sink-loads-into-loops` | let a sinking load pass one loop header, so a preamble load whose only readers are inside the batch loop stops pinning a register across the whole program |
-| `--sink-loads-past-branches` | let a sinking load cross a branch to a point every path out of its old position reaches, and only after an allocation has already run out of registers |
-| `--drop-dead-writes` | delete a token whose register destination is read nowhere in the program, field by field, and whose MAC/CLIP/I/Q/P/R/ACC writes nothing observes either |
 | `--enable-generic-software-pipelining` | enable safe generic software-pipeline rewrites, currently the default |
 | `--disable-generic-software-pipelining` | disable generic software-pipeline rewrites for comparison/debugging |
 | `--strict-schedule-slots` | emit from the typed scheduler slot model without legacy lookahead pairing |
 
 `-M`, `-P`, and `-Z` are accepted for VCL command-line compatibility.
 
-The seventeen density, register-allocation and dead-code options are additions
-this fork makes to OpenVCL, and every one of them is off by default. What each is
-for and what it measured are in [`NOTICE-TYRAX.md`](NOTICE-TYRAX.md).
+The seventeen density, register-allocation and dead-code options this fork adds
+are listed above, under *The seventeen options*.
 
 ## VSM Cost Analysis
 
