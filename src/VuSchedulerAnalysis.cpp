@@ -68,22 +68,34 @@ namespace
 	// (`fcand VI01,0x3CA3CA` names all four entries) sees which push landed in
 	// which entry, so the writers must keep their program order among themselves
 	// as well. Chaining is what says that.
+	// `alreadyBarriered` is how many of `writers` a previous call already covered.
+	// The list is no longer emptied at a reader (see below), so this runs once per
+	// reader over a list that only grows, and without it the fan-in would be
+	// re-emitted in full every time - correct, because duplicate edges cancel
+	// between `incoming` and `outgoing`, but quadratic for nothing.
 	void addImplicitFlagWriterBarrierEdges( std::vector<VuDependencyEdge>& edges,
 	                                        const std::vector<unsigned int>& writers,
 	                                        bool preserveFinalWriter,
-	                                        bool chainWriters )
+	                                        bool chainWriters,
+	                                        unsigned int alreadyBarriered = 0 )
 	{
 		if( writers.size() < 2 )
 			return;
 
 		if( chainWriters )
 		{
-			for( unsigned int i = 1; i < writers.size(); ++i )
+			unsigned int first = alreadyBarriered < 1 ? 1 : alreadyBarriered;
+			for( unsigned int i = first; i < writers.size(); ++i )
 				addEdge( edges, writers[i - 1], writers[i], VU_DEPENDENCY_RESOURCE_WAW );
 			return;
 		}
 
 		if( !preserveFinalWriter )
+			return;
+
+		// Nothing has been added since the last call, so the final writer is the
+		// one that was already fanned into.
+		if( alreadyBarriered == writers.size() )
 			return;
 
 		const unsigned int finalWriter = writers.back();
@@ -102,9 +114,10 @@ namespace
 	//
 	// This is deliberately NOT addPreciseImplicitFlagDependencies with a flag. That
 	// one models a register: it edges the writers into the LAST writer and only the
-	// last writer into the reader, and it FLUSHES its writer list at every reader,
-	// both of which are right for a value that gets replaced and wrong for one that
-	// gets merged. Here:
+	// last writer into the reader, which is right for a value that gets replaced
+	// and wrong for one that gets merged. (It used also to empty its writer list at
+	// a reader. That was not a difference between the two, it was a bug in that
+	// one, and this pass is what it was fixed against.) Here:
 	//
 	//   * every contributor since the last clear is edged into every reader, because
 	//     every one of them is part of the answer the reader gets;
@@ -192,6 +205,7 @@ namespace
 	                                         unsigned int ignoredImplicitWawResources )
 	{
 		std::vector<unsigned int> pendingWriters;
+		unsigned int barrieredWriters = 0;
 		const bool preserveLiveOutWriter = (ignoredImplicitWawResources & resource) == 0;
 		// Only CLIP shifts; every other implicit resource here is a plain register.
 		// Not behind a flag: which push landed in which entry is a property of the
@@ -207,10 +221,32 @@ namespace
 			{
 				if( !pendingWriters.empty() )
 				{
-					addImplicitFlagWriterBarrierEdges( edges, pendingWriters, true, chainWriters );
+					addImplicitFlagWriterBarrierEdges( edges, pendingWriters, true, chainWriters,
+					                                   barrieredWriters );
+					barrieredWriters = pendingWriters.size();
 					addEdge( edges, pendingWriters.back(), index, VU_DEPENDENCY_RESOURCE_RAW );
 				}
-				pendingWriters.clear();
+
+				// AND THE LIST IS NOT EMPTIED HERE. A reader consumes nothing: the
+				// value it read is still the value in the register, so the NEXT
+				// reader of the same resource observes the same writers and needs
+				// the same edges. Clearing left a second reader with no edge at
+				// all - free to be scheduled above the writers it reads, and above
+				// the first reader - and that is a miscompile, not a relaxation.
+				//
+				// It survived because something else usually orders the pair by
+				// accident: two `fcand`s writing the same VI register have a
+				// register WAW between them, and the RAW into the first one then
+				// holds the second down transitively. Give them different
+				// destinations, or make the second reader's fields disjoint from
+				// the first's - `madd.x`/`madd.y`/`madd.z` draining one ACC seed -
+				// and nothing holds it at all. Both shapes are in this engine.
+				//
+				// Only an actual KILL retires a writer, and for these resources
+				// there is no kill to model: a later write is edged into the
+				// readers after it by the same fan-in, so keeping the earlier ones
+				// in the list costs redundant WAW edges and nothing else. This is
+				// what addAccumulatingImplicitFlagDependencies has always done.
 			}
 
 			if( writesResource )
@@ -222,7 +258,8 @@ namespace
 		// is as unordered as a plain one. `preserveLiveOutWriter` gates the chain
 		// for the same reason it gates the fan-in.
 		addImplicitFlagWriterBarrierEdges( edges, pendingWriters, preserveLiveOutWriter,
-		                                   chainWriters && preserveLiveOutWriter );
+		                                   chainWriters && preserveLiveOutWriter,
+		                                   barrieredWriters );
 	}
 
 	bool memoryOrderRequiresDependency( const VuTokenResourceAccess& beforeAccess,
