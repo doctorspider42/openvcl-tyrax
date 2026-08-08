@@ -39,6 +39,11 @@ public:
 	// unsuppressed retry reports it just the same.
 	static void SetSuppressed( bool suppressed );
 
+	// Suppression has to NEST: --split-dead-float-ranges retries around the
+	// --sink-loads-past-branches retry, and an outer attempt that restored
+	// `false` on the way out would un-suppress the inner one.
+	static bool Suppressed();
+
 private:
 
 	enum

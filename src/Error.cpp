@@ -184,4 +184,9 @@ void Error::SetSuppressed( bool suppressed )
 	ms_suppressed = suppressed;
 }
 
+bool Error::Suppressed()
+{
+	return ms_suppressed;
+}
+
 }

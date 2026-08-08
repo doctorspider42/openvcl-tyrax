@@ -176,6 +176,78 @@ bool vuCoalesceFloatWritesEnabled();
 // same loop, and no branch lies between the two ends - i.e. only when the value
 // provably dies at its last use. Off by default: it removes liveness, so it is
 // the one change here that could hide a real carry if the test were wrong.
+// --split-dead-float-ranges: give each INDEPENDENT value of a float name its own
+// register, so the scheduler can interleave chains that only ever shared a name.
+//
+// openvcl keeps one Alias per source name as soon as the name's writes use mixed
+// field masks, because BranchState::writeFloat decides whether to reuse the
+// existing alias with
+//     depend = ((state.fields() & ~argument.fields()) != 0)
+// and state.fields() is every field EVER written to the name, not the fields
+// still live.  `vuS1`, written .z and then .x, is therefore ONE alias for the
+// whole program - and the three per-vertex chains in the generated scripts,
+// which reuse the same temporary names, are welded onto one register before the
+// scheduler ever runs.  The scheduler keys its hazards on the ALLOCATED register
+// (VuTokenResourceAccess::vuRegisterKey), so it sees one serial dependence graph
+// where the source has three independent ones, and stalls at every step.  SCE's
+// vcl splits the same names - in vu_script3_c it puts the three copies of vuS1
+// in VF22, VF27 and VF26 and interleaves them three rows apart, 22 stall cycles
+// against openvcl's 347 on the same 258 words.
+//
+// This pass renames, before anything else looks at the token list, so the rest
+// of the compiler is untouched and just sees more names.  A rename is only taken
+// where it is provably safe: every access to the name must sit inside ONE
+// straight-line region (no label, no branch, no directive inside), which makes a
+// linear scan exact and means the name can be neither live-in nor live-out; the
+// region's first access must be a write, so nothing is carried in across a back
+// edge; and the split point must be a write whose field mask covers every field
+// still to be read AND which does not itself read the name, so it is a full kill
+// of the old value rather than a two-address self-update.
+//
+// Splitting costs registers, which is what the six allocator flags fight, so it
+// is paired with a register CHOICE change under the same flag: among the free
+// registers the allocator would accept, take the one whose nearest already-
+// placed neighbour is furthest away instead of the lowest-numbered one.  Without
+// that the split webs, whose ranges are disjoint, land back on one register by
+// first fit and nothing has changed.  Off by default: it changes which register
+// every value lands in.
+void setVuSplitDeadFloatRangesEnabled( bool enabled );
+bool vuSplitDeadFloatRangesEnabled();
+
+// The register-CHOICE half of --split-dead-float-ranges, on its own switch so the
+// allocation ladder can drop it without dropping the rename.
+//
+// Measured, and it overturns the reason the fallback was written: on all three
+// programs that fall back, the peak number of simultaneously live float aliases
+// is IDENTICAL with the split and without it - 31, 22 and 23 against 31
+// available.  It has to be: splitting a name partitions its live range, so it
+// can never raise the number of values live at a line, only the number of names.
+// Two of the three fail nine registers below the ceiling.  What runs out is not
+// the file, it is this placement rule: `preferSpreadRegister` takes an untouched
+// register outright when it finds one, so the first thirty-one values each claim
+// a fresh register and a long-lived constant allocated later - `k0` in both
+// vu_script2_*_cl - finds every one of them occupied somewhere inside its range.
+//
+// So the ladder backs the spread off in stages instead of giving up on the
+// rename.  See Parser::allocateRegisters.
+void setVuSpreadFloatRegistersEnabled( bool enabled );
+bool vuSpreadFloatRegistersEnabled();
+
+// --spread-webs-only, and the ladder's second rung: narrow the spread to the
+// aliases the split actually created - the ones whose name carries the
+// `~generation` suffix - and place everything else by first fit.
+//
+// The spread exists to put two webs of ONE name on two registers.  Nothing about
+// that needs the program's constants scattered as well, and scattering them is
+// what leaves a long-lived value with nothing to allocate: in vu0_rt_kernel the
+// alias that fails is `bT`, the ray's best hit distance, live over 296 rows and
+// never split.  Narrowed, that program allocates on its first attempt and its
+// modelled cost goes 1278 -> 1066 cycles, 747 -> 540 FMAC stall cycles, on four
+// words LESS.  Applied to all seventy it is worth less than the ladder is (-190
+// modelled cycles against -211), so it is a rung and not the default.
+void setVuSpreadFloatRegistersWebsOnly( bool enabled );
+bool vuSpreadFloatRegistersWebsOnly();
+
 void setVuTrimUncarriedRangesEnabled( bool enabled );
 bool vuTrimUncarriedRangesEnabled();
 

@@ -64,6 +64,8 @@ public:
 	bool loopLivenessAlways() const;
 	bool upperMoveWithW() const;
 	bool coalesceFloatWrites() const;
+	bool splitDeadFloatRanges() const;
+	bool spreadWebsOnly() const;
 	bool trimUncarriedRanges() const;
 	bool sinkLoads() const;
 	bool sinkLoadsAcrossStores() const;
@@ -159,6 +161,8 @@ private:
 		LOOP_LIVENESS_ALWAYS,
 		UPPER_MOVE_WITH_W,
 		COALESCE_FLOAT_WRITES,
+		SPLIT_DEAD_FLOAT_RANGES,
+		SPREAD_WEBS_ONLY,
 		TRIM_UNCARRIED_RANGES,
 		SINK_LOADS,
 		SINK_LOADS_ACROSS_STORES,
@@ -235,6 +239,8 @@ private:
 	bool m_loopLivenessAlways;
 	bool m_upperMoveWithW;
 	bool m_coalesceFloatWrites;
+	bool m_splitDeadFloatRanges;
+	bool m_spreadWebsOnly;
 	bool m_trimUncarriedRanges;
 	bool m_sinkLoads;
 	bool m_sinkLoadsAcrossStores;

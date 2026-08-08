@@ -156,6 +156,24 @@ private:
 	// whatever liveness they genuinely require.
 	void trimUncarriedLoopLocalRanges( std::list<Token>& tokens );
 
+	// --split-dead-float-ranges.  Rename float alias occurrences so each
+	// independent value of a source name gets its own Alias, and so its own
+	// register.  Runs before anything reads a line number or builds a branch
+	// state: it is a pure rewrite of Token::Argument::alias() and the rest of
+	// the compiler simply sees more names.  Returns the number of renamed
+	// occurrences.  See VuSchedulingRules.h for why this is the pass that
+	// reaches openvcl's FMAC stalls.
+	unsigned int splitDeadFloatRanges( std::list<Token>& tokens );
+
+	// The register a free-list scan should hand out.  With
+	// --split-dead-float-ranges the lowest-numbered free register is the wrong
+	// answer: two webs of one split name have disjoint ranges by construction,
+	// so first fit puts them straight back on one register and the split buys
+	// nothing.  Score each acceptable candidate by how far the nearest range
+	// already on it sits from `dest`, and take the furthest.
+	const Register* preferSpreadRegister( const std::vector<Alias*>& group,
+	                                      const std::vector<const Register*>& candidates ) const;
+
 	// --coalesce-float-writes.  Tie a float write to the alias holding the same
 	// source-level name's previous value when that value is dead from here on,
 	// so the two-address chain pre-pass hands both one register.  Runs last, on

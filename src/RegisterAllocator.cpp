@@ -27,6 +27,17 @@
 namespace vcl
 {
 
+namespace
+{
+	// An alias splitDeadFloatRanges created, told apart by the `~generation`
+	// suffix it renames into.  `~` cannot occur in a VCL identifier, so the test
+	// can never mistake a source name for a web.
+	bool aliasIsSplitWeb( const Alias* alias )
+	{
+		return alias != NULL && alias->debugName().find( '~' ) != std::string::npos;
+	}
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 RegisterAllocator::RegisterAllocator()
@@ -117,6 +128,16 @@ bool RegisterAllocator::process( std::list<Token>& tokens )
 		const unsigned int dropped = dropDeadRegisterWrites( tokens );
 		if( m_showRegisterInfo )
 			std::cerr << "--drop-dead-writes removed " << dropped << " tokens" << std::endl;
+	}
+
+	// Before the sink pass, and while a name still means what the source meant
+	// by it: splitting renames alias occurrences, and sinking decides where a
+	// load goes by which alias reads it.
+	if( vuSplitDeadFloatRangesEnabled() )
+	{
+		const unsigned int split = splitDeadFloatRanges( tokens );
+		if( m_showRegisterInfo )
+			std::cerr << "--split-dead-float-ranges renamed " << split << " occurrences" << std::endl;
 	}
 
 	// First, before anything reads a line number: this is the one pass that
@@ -751,6 +772,25 @@ bool RegisterAllocator::processAliases()
 		}
 
 		unsigned int maxLimit = root->type() == Alias::FLOAT ? 32 : 16;
+		// With --split-dead-float-ranges, first fit is the wrong answer here for
+		// the same reason as in the main loop below - and this pre-pass places
+		// almost everything, because --coalesce-float-writes makes almost every
+		// alias a chain root or a chain member.  A spread policy that skipped
+		// this loop would never run.
+		// FLOAT only.  The split pass renames float aliases, so only the float
+		// file has webs to spread; spreading the sixteen-wide integer file buys no
+		// interleave and burns the registers that hold loop counters and DMA base
+		// pointers.  Left on for integers it was the cause of most of the
+		// fallbacks below - `Failed to allocate INTEGER register for alias
+		// srcBase` in vu_script3_td_cl, with the float side fitting fine - and
+		// turning it off is better on all three corpora AND on modelled cycles.
+		bool chainHasWeb = false;
+		for( unsigned int m = 0; !chainHasWeb && m < chain.size(); ++m )
+			chainHasWeb = aliasIsSplitWeb( chain[m] );
+		const bool spreadChain = vuSpreadFloatRegistersEnabled()
+		                         && root->type() == Alias::FLOAT
+		                         && ( !vuSpreadFloatRegistersWebsOnly() || chainHasWeb );
+		std::vector<const Register*> chainAcceptable;
 		for( unsigned int j = 0; j < maxLimit; ++j )
 		{
 			const Register* candidate = (root->type() == Alias::FLOAT) ? &m_floats[j] : &m_integers[j];
@@ -784,10 +824,21 @@ bool RegisterAllocator::processAliases()
 
 			if( !conflict )
 			{
-				for( unsigned int m = 0; m < chain.size(); ++m )
-					chain[m]->setAllocatedRegister( candidate );
-				break;
+				if( !spreadChain )
+				{
+					for( unsigned int m = 0; m < chain.size(); ++m )
+						chain[m]->setAllocatedRegister( candidate );
+					break;
+				}
+				chainAcceptable.push_back( candidate );
 			}
+		}
+
+		if( spreadChain && !chainAcceptable.empty() )
+		{
+			const Register* chosen = preferSpreadRegister( chain, chainAcceptable );
+			for( unsigned int m = 0; m < chain.size(); ++m )
+				chain[m]->setAllocatedRegister( chosen );
 		}
 	}
 
@@ -849,6 +900,16 @@ bool RegisterAllocator::processAliases()
 			}
 		}
 
+		// With --split-dead-float-ranges the lowest-numbered acceptable
+		// register is the wrong answer, so every acceptable one is collected
+		// and preferSpreadRegister picks.  Without the flag the vector is
+		// short-circuited on the first hit and the behaviour is unchanged,
+		// byte for byte.
+		const bool spread = vuSpreadFloatRegistersEnabled()
+		                    && dest->type() == Alias::FLOAT
+		                    && ( !vuSpreadFloatRegistersWebsOnly() || aliasIsSplitWeb( dest ) );
+		std::vector<const Register*> acceptable;
+
 		for( unsigned int j = 0; j < maxLimit; ++j )
 		{
 			const Register* candidate = (dest->type() == Alias::FLOAT) ? &m_floats[j] : &m_integers[j];
@@ -878,9 +939,20 @@ bool RegisterAllocator::processAliases()
 
 			if( candidate )
 			{
-				dest->setAllocatedRegister( candidate );
-				break;
+				if( !spread )
+				{
+					dest->setAllocatedRegister( candidate );
+					break;
+				}
+				acceptable.push_back( candidate );
 			}
+		}
+
+		if( spread && !acceptable.empty() )
+		{
+			std::vector<Alias*> group;
+			group.push_back( dest );
+			dest->setAllocatedRegister( preferSpreadRegister( group, acceptable ) );
 		}
 
 		if( !dest->allocatedRegister() )
@@ -2559,6 +2631,281 @@ void RegisterAllocator::trimUncarriedLoopLocalRanges( std::list<Token>& tokens )
 		for( unsigned int n = 0; n < intervals.size(); ++n )
 			alias->addRange( intervals[n].first, intervals[n].second );
 	}
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace
+{
+	// One occurrence of a float alias name in the token list.
+	struct FloatAliasAccess
+	{
+		Token::Argument* argument;
+		unsigned int slot;
+		unsigned int mask;
+		bool write;
+	};
+}
+
+// --split-dead-float-ranges.  See VuSchedulingRules.h.
+//
+// The safety argument, because this pass is exactly how a scheduler comes to
+// emit a program that assembles, fits, and computes the wrong thing:
+//
+//  * A REGION is a maximal run of emittable instructions with no label, no
+//    branch and no directive inside.  Control flow cannot enter a region except
+//    at its top and cannot leave it except at its bottom, so a linear scan of a
+//    region is exact - no CFG needed, and none of the conservatism a wrong CFG
+//    would hide.
+//  * A name is only considered when EVERY access to it in the whole program is
+//    inside ONE region.  A name accessed nowhere else cannot be live-out (a
+//    later read would be an access), and cannot be live-in either unless the
+//    region's own first access reads it - which is checked separately and
+//    disqualifies the name.  So the value neither enters nor leaves, including
+//    across a back edge that re-enters the region every iteration.
+//  * A SPLIT POINT is a write whose field mask covers every field of the name
+//    that is still to be read, and which does not itself read the name.  The
+//    first condition makes it a full kill: nothing of the old value survives, so
+//    a fresh register may start here and no masked write ever inherits fields
+//    from a register that no longer holds them.  The second excludes two-address
+//    self-updates (`sub.x vuS2, vuS2, k0[z]`), where the edge crossed is a true
+//    RAW and splitting would only widen liveness by one row for no gain.
+//  * Names bound to physical registers by --enter/--exit (in_vf / out_vf) are
+//    never renamed: their register is the program's ABI.
+unsigned int RegisterAllocator::splitDeadFloatRanges( std::list<Token>& tokens )
+{
+	// Names pinned to a physical register by the entry / exit blocks.
+	std::set<std::string> pinned;
+	for( std::list<Token>::const_iterator t = tokens.begin(); t != tokens.end(); ++t )
+	{
+		if( !t->operand() )
+			continue;
+		if( t->operand()->unit() != Operand::ENTER && t->operand()->unit() != Operand::EXIT )
+			continue;
+		for( std::list<Token::Argument>::const_iterator a = t->arguments().begin();
+		     a != t->arguments().end(); ++a )
+		{
+			if( !a->immediate().empty() )
+				pinned.insert( a->immediate() );
+			if( !a->alias().empty() )
+				pinned.insert( a->alias() );
+		}
+	}
+
+	// Slots: the emittable instructions in list order, each tagged with the
+	// region it belongs to.  A label, a directive and anything not emittable
+	// break the region BEFORE the token; a branch breaks it after.
+	std::vector<Token*> slots;
+	std::vector<unsigned int> slotRegion;
+	unsigned int region = 0;
+	for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t )
+	{
+		if( !t->label().empty() || !tokenIsEmittable( *t ) )
+			++region;
+		if( !tokenIsEmittable( *t ) )
+			continue;
+		slots.push_back( &*t );
+		slotRegion.push_back( region );
+		if( t->operand()->unit() == Operand::BRU )
+			++region;
+	}
+
+	// Every float-alias occurrence, grouped by name, in slot order.
+	std::map< std::string, std::vector<FloatAliasAccess> > byName;
+	for( unsigned int s = 0; s < slots.size(); ++s )
+	{
+		Token& token = *slots[s];
+		for( std::list<Token::Argument>::iterator a = token.arguments().begin();
+		     a != token.arguments().end(); ++a )
+		{
+			if( a->type() != Token::Argument::FLOAT_REGISTER )
+				continue;
+			if( a->content() != Token::Argument::ALIAS )
+				continue;
+			if( a->alias().empty() )
+				continue;
+
+			FloatAliasAccess access;
+			access.argument = &*a;
+			access.slot = s;
+			access.write = ( a->flags() & Token::Argument::WRITE ) != 0;
+			access.mask = access.write ? vuWriteFieldMask( token, *a )
+			                           : vuReadFieldMask( token, *a );
+			byName[ a->alias() ].push_back( access );
+		}
+	}
+
+	unsigned int renamed = 0;
+
+	for( std::map< std::string, std::vector<FloatAliasAccess> >::iterator n = byName.begin();
+	     n != byName.end(); ++n )
+	{
+		const std::string& name = n->first;
+		std::vector<FloatAliasAccess>& access = n->second;
+
+		if( pinned.find( name ) != pinned.end() )
+			continue;
+		if( access.size() < 2 )
+			continue;
+
+		// One region, or nothing doing.
+		const unsigned int home = slotRegion[ access[0].slot ];
+		bool oneRegion = true;
+		for( unsigned int i = 1; oneRegion && i < access.size(); ++i )
+			if( slotRegion[ access[i].slot ] != home )
+				oneRegion = false;
+		if( !oneRegion )
+			continue;
+
+		// Backward scan.  `live` is the set of fields that will still be read
+		// before something writes them.
+		unsigned int live = 0;
+		std::vector<unsigned int> kills;
+		int i = (int)access.size() - 1;
+		while( i >= 0 )
+		{
+			const unsigned int slot = access[i].slot;
+			unsigned int writeMask = 0;
+			unsigned int readMask = 0;
+			int j = i;
+			while( j >= 0 && access[j].slot == slot )
+			{
+				if( access[j].write )
+					writeMask |= access[j].mask;
+				else
+					readMask |= access[j].mask;
+				--j;
+			}
+			if( writeMask )
+			{
+				if( live != 0 && ( live & ~writeMask ) == 0 && readMask == 0 )
+					kills.push_back( slot );
+				live &= ~writeMask;
+			}
+			live |= readMask;
+			i = j;
+		}
+
+		// live != 0 here means a field is read before any write covers it: the
+		// name is live-in, so the value crosses the region boundary and the
+		// whole argument above collapses.  Refuse.
+		if( live != 0 || kills.empty() )
+			continue;
+
+		// Forward rewrite.  kills came out of a backward scan, so it is
+		// descending; walk it from the back.
+		unsigned int generation = 0;
+		int nextKill = (int)kills.size() - 1;
+		for( unsigned int k = 0; k < access.size(); ++k )
+		{
+			while( nextKill >= 0 && access[k].slot == kills[nextKill] )
+			{
+				++generation;
+				--nextKill;
+			}
+			if( generation == 0 )
+				continue;
+			std::stringstream renamedTo;
+			renamedTo << name << "~" << generation;
+			access[k].argument->setAlias( renamedTo.str() );
+			++renamed;
+		}
+	}
+
+	return renamed;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Among the registers the conflict test already accepted, the one whose nearest
+// occupied neighbour is furthest from `dest`.  A register with nothing on it at
+// all wins outright; ties keep the lowest number, so the choice is a function of
+// the ranges and not of allocation order.
+//
+// The `score < 0` shortcut - an empty register wins outright - is what buys the
+// interleave and also what makes the spread expensive: the first thirty-one
+// values each take a fresh register.  Capping it was measured and rejected.  A
+// cap of four rows applied to all seventy programs costs 3491 modelled cycles
+// and grows every corpus; the fix for the programs that run out is to narrow
+// WHICH aliases are spread, not how far.  See vuSpreadFloatRegistersWebsOnly.
+const Register* RegisterAllocator::preferSpreadRegister( const std::vector<Alias*>& group,
+                                                         const std::vector<const Register*>& candidates ) const
+{
+	if( candidates.empty() )
+		return NULL;
+	if( candidates.size() == 1 )
+		return candidates[0];
+	if( group.empty() )
+		return candidates[0];
+
+	// The group's extent: a two-address chain shares one register over the
+	// union of its members' ranges, so that union is what the gap is measured
+	// from.
+	unsigned int lo = 0;
+	unsigned int hi = 0;
+	bool haveExtent = false;
+	for( unsigned int g = 0; g < group.size(); ++g )
+	{
+		unsigned int glo = 0;
+		unsigned int ghi = 0;
+		if( !group[g]->rangeExtent( glo, ghi ) )
+			continue;
+		if( !haveExtent || glo < lo ) lo = glo;
+		if( !haveExtent || ghi > hi ) hi = ghi;
+		haveExtent = true;
+	}
+	if( !haveExtent )
+		return candidates[0];
+
+	const Register* best = candidates[0];
+	long bestScore = -1;
+
+	for( unsigned int c = 0; c < candidates.size(); ++c )
+	{
+		const Register* candidate = candidates[c];
+		long score = -1;
+
+		for( AliasMap::const_iterator k = m_aliases.begin(); k != m_aliases.end(); ++k )
+		{
+			Alias* src = k->first;
+			bool inGroup = false;
+			for( unsigned int g = 0; !inGroup && g < group.size(); ++g )
+				if( group[g] == src ) inGroup = true;
+			if( inGroup )
+				continue;
+			if( src->allocatedRegister() != candidate )
+				continue;
+			unsigned int slo = 0;
+			unsigned int shi = 0;
+			if( !src->rangeExtent( slo, shi ) )
+				continue;
+
+			long gap;
+			if( shi < lo )
+				gap = (long)lo - (long)shi;
+			else if( slo > hi )
+				gap = (long)slo - (long)hi;
+			else
+				gap = 0;                      // overlapping: the conflict test
+			                                  // let it through on ranges with
+			                                  // holes, so score it worst.
+			if( score < 0 || gap < score )
+				score = gap;
+		}
+
+		if( score < 0 )
+			return candidate;                 // untouched register, take it
+
+		if( score > bestScore )
+		{
+			bestScore = score;
+			best = candidate;
+		}
+	}
+
+	return best;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

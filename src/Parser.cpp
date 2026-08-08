@@ -2064,6 +2064,9 @@ bool Parser::tokenize()
 	setVuLoopLivenessAlwaysEnabled( m_cmdLine.loopLivenessAlways() );
 	setVuUpperMoveWithWEnabled( m_cmdLine.upperMoveWithW() );
 	setVuCoalesceFloatWritesEnabled( m_cmdLine.coalesceFloatWrites() );
+	setVuSplitDeadFloatRangesEnabled( m_cmdLine.splitDeadFloatRanges() );
+	setVuSpreadFloatRegistersEnabled( m_cmdLine.splitDeadFloatRanges() );
+	setVuSpreadFloatRegistersWebsOnly( m_cmdLine.spreadWebsOnly() );
 	setVuTrimUncarriedRangesEnabled( m_cmdLine.trimUncarriedRanges() );
 	setVuSinkLoadsEnabled( m_cmdLine.sinkLoads() );
 	setVuSinkLoadsAcrossStoresEnabled( m_cmdLine.sinkLoadsAcrossStores() );
@@ -2095,7 +2098,119 @@ bool Parser::tokenize()
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// --split-dead-float-ranges costs registers, and three of the seventy programs
+// run out.  Allocate with it, and if that runs out put the tokenizer's own output
+// back and allocate again - the same bargain --coalesce-float-writes and
+// --sink-loads-past-branches strike, so the flag can only ever add programs that
+// compile.  Whatever this settles on stays settled for the REST of this program,
+// because --sink-loads-best-of recompiles from the source lines and has to reach
+// the same decision this attempt did.
+//
+// A LADDER rather than one all-or-nothing fallback, because measuring the three
+// says the rename is not what runs out.  The peak number of simultaneously live
+// float aliases is IDENTICAL with the split and without it in all three -
+// vu0_rt_kernel 31, vu_script2_d_cl 22, vu_script2_td_cl 23, against 31 available
+// - which is forced rather than lucky: splitting a name partitions its live
+// range, so it can add names but never add values live at a line.  Two of the
+// three run out nine registers below the ceiling.  What runs out is the placement
+// rule the flag also turns on: preferSpreadRegister takes an untouched register
+// outright, so the first thirty-one values each claim a fresh one and the
+// long-lived constant `k0`, allocated later, finds all thirty-one busy somewhere
+// inside its range.
+//
+// So the rungs back the SPREAD off, never the rename, and back it off by scope
+// rather than by distance:
+//
+//   1  spread every float alias          - unchanged, and 67 of 70 stop here
+//   2  spread only the split webs        - constants and un-split names first fit
+//   3  no spread                         - the rename alone
+//   4  no split                          - what the whole program did before
+//
+// Rung 2 is where all three land, and it is worth having: vu0_rt_kernel goes 1278
+// -> 1066 modelled cycles and 470 -> 466 words, because the spread that program
+// needs is over the twenty-odd names the split renamed, not over the six
+// whole-program constants and the ray state that were never welded to begin with.
+// Backing off by DISTANCE instead - "a register N rows away is as good as an empty
+// one" - was built and measured and is not in the tree: it fixes the same three
+// and costs 3491 modelled cycles across the other sixty-seven at N=4, because an
+// empty register is exactly what the interleave needs.
+//
+// Rung 1 first, so a program that allocates today is emitted by the same code in
+// the same order as before this ladder existed - byte for byte, all 70 checked.
 bool Parser::allocateRegisters()
+{
+	const bool retrySplit = m_cmdLine.splitDeadFloatRanges();
+
+	std::list<Token> pristine;
+	const bool wasSuppressed = Error::Suppressed();
+	if( retrySplit )
+	{
+		const std::list<Token>& current = m_tokenizer.tokens();
+		pristine.insert( pristine.end(), current.begin(), current.end() );
+		Error::SetSuppressed( true );
+	}
+
+	bool allocated = allocateRegistersAttempt();
+
+	if( retrySplit && !allocated && !m_cmdLine.spreadWebsOnly() )
+	{
+		if( m_cmdLine.showRegisterInfo() )
+			std::cerr << "Retrying allocation with the spread narrowed to the split webs" << std::endl;
+
+		m_tokenizer.tokens().clear();
+		m_tokenizer.tokens().insert( m_tokenizer.tokens().end(),
+		                             pristine.begin(), pristine.end() );
+		m_registerAllocator.reset();
+		setVuSpreadFloatRegistersWebsOnly( true );
+
+		allocated = allocateRegistersAttempt();
+	}
+
+	if( retrySplit && !allocated )
+	{
+		if( m_cmdLine.showRegisterInfo() )
+			std::cerr << "Retrying allocation without the float register spread" << std::endl;
+
+		m_tokenizer.tokens().clear();
+		m_tokenizer.tokens().insert( m_tokenizer.tokens().end(),
+		                             pristine.begin(), pristine.end() );
+		m_registerAllocator.reset();
+		setVuSpreadFloatRegistersEnabled( false );
+
+		allocated = allocateRegistersAttempt();
+	}
+
+	if( retrySplit )
+	{
+		Error::SetSuppressed( wasSuppressed );
+
+		if( !allocated )
+		{
+			if( m_cmdLine.showRegisterInfo() )
+				std::cerr << "Retrying allocation without --split-dead-float-ranges" << std::endl;
+
+			m_tokenizer.tokens().clear();
+			m_tokenizer.tokens().insert( m_tokenizer.tokens().end(),
+			                             pristine.begin(), pristine.end() );
+			m_registerAllocator.reset();
+			setVuSplitDeadFloatRangesEnabled( false );
+			setVuSpreadFloatRegistersEnabled( false );
+
+			allocated = allocateRegistersAttempt();
+		}
+	}
+
+	if( !allocated )
+		return false;
+
+	setState( GENERATE_CODE );
+
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+bool Parser::allocateRegistersAttempt()
 {
 	// --sink-loads-past-branches is not applied speculatively. Carrying a load
 	// over a branch reorders the block it lands in, and the scheduler then does
@@ -2108,6 +2223,10 @@ bool Parser::allocateRegisters()
 	// --coalesce-float-writes retry inside the allocator makes: the flag can only
 	// ever add programs that compile, never change one that already did.
 	const bool retryPastBranches = m_cmdLine.sinkLoads() && m_cmdLine.sinkLoadsPastBranches();
+
+	// Saved, not assumed false: allocateRegisters() may already have suppressed
+	// on the way in for its own speculative attempt.
+	const bool suppressedOnEntry = Error::Suppressed();
 
 	std::list<Token> pristine;
 	if( retryPastBranches )
@@ -2133,7 +2252,7 @@ bool Parser::allocateRegisters()
 
 	if( retryPastBranches )
 	{
-		Error::SetSuppressed( false );
+		Error::SetSuppressed( suppressedOnEntry );
 
 		if( !allocated )
 		{
@@ -2155,12 +2274,7 @@ bool Parser::allocateRegisters()
 		}
 	}
 
-	if( !allocated )
-		return false;
-
-	setState( GENERATE_CODE );
-
-	return true;
+	return allocated;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -586,6 +586,9 @@ namespace
 	bool g_upperMoveWithW = false;
 	bool g_coalesceFloatWrites = false;
 	bool g_trimUncarriedRanges = false;
+	bool g_splitDeadFloatRanges = false;
+	bool g_spreadFloatRegisters = false;
+	bool g_spreadFloatRegistersWebsOnly = false;
 	bool g_sinkLoads = false;
 	bool g_sinkLoadsAcrossStores = false;
 	bool g_sinkLoadsIntoLoops = false;
@@ -797,6 +800,36 @@ void setVuCoalesceFloatWritesEnabled( bool enabled )
 bool vuCoalesceFloatWritesEnabled()
 {
 	return g_coalesceFloatWrites;
+}
+
+void setVuSplitDeadFloatRangesEnabled( bool enabled )
+{
+	g_splitDeadFloatRanges = enabled;
+}
+
+bool vuSplitDeadFloatRangesEnabled()
+{
+	return g_splitDeadFloatRanges;
+}
+
+void setVuSpreadFloatRegistersEnabled( bool enabled )
+{
+	g_spreadFloatRegisters = enabled;
+}
+
+bool vuSpreadFloatRegistersEnabled()
+{
+	return g_spreadFloatRegisters;
+}
+
+void setVuSpreadFloatRegistersWebsOnly( bool enabled )
+{
+	g_spreadFloatRegistersWebsOnly = enabled;
+}
+
+bool vuSpreadFloatRegistersWebsOnly()
+{
+	return g_spreadFloatRegistersWebsOnly;
 }
 
 void setVuTrimUncarriedRangesEnabled( bool enabled )

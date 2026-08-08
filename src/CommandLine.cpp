@@ -83,6 +83,8 @@ CommandLine::CommandLine()
 	m_loopLivenessAlways = false;
 	m_upperMoveWithW = false;
 	m_coalesceFloatWrites = false;
+	m_splitDeadFloatRanges = false;
+	m_spreadWebsOnly = false;
 	m_trimUncarriedRanges = false;
 	m_sinkLoads = false;
 	m_sinkLoadsAcrossStores = false;
@@ -154,6 +156,8 @@ CommandLine::CommandLine()
 	m_options.push_back(Option(0,"loop-liveness-always",LOOP_LIVENESS_ALWAYS,false));
 	m_options.push_back(Option(0,"upper-move-with-w",UPPER_MOVE_WITH_W,false));
 	m_options.push_back(Option(0,"coalesce-float-writes",COALESCE_FLOAT_WRITES,false));
+	m_options.push_back(Option(0,"split-dead-float-ranges",SPLIT_DEAD_FLOAT_RANGES,false));
+	m_options.push_back(Option(0,"spread-webs-only",SPREAD_WEBS_ONLY,false));
 	m_options.push_back(Option(0,"trim-uncarried-ranges",TRIM_UNCARRIED_RANGES,false));
 	m_options.push_back(Option(0,"sink-loads",SINK_LOADS,false));
 	m_options.push_back(Option(0,"sink-loads-across-stores",SINK_LOADS_ACROSS_STORES,false));
@@ -289,6 +293,8 @@ bool CommandLine::parse( int argc, char* argv[] )
 				case LOOP_LIVENESS_ALWAYS: m_loopLivenessAlways = true; break;
 				case UPPER_MOVE_WITH_W: m_upperMoveWithW = true; break;
 				case COALESCE_FLOAT_WRITES: m_coalesceFloatWrites = true; break;
+				case SPLIT_DEAD_FLOAT_RANGES: m_splitDeadFloatRanges = true; break;
+				case SPREAD_WEBS_ONLY: m_spreadWebsOnly = true; break;
 				case TRIM_UNCARRIED_RANGES: m_trimUncarriedRanges = true; break;
 				case SINK_LOADS: m_sinkLoads = true; break;
 				case SINK_LOADS_ACROSS_STORES: m_sinkLoadsAcrossStores = true; break;

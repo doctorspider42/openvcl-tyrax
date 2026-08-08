@@ -96,6 +96,7 @@ private:
 	bool preProcess();
 	bool tokenize();
 	bool allocateRegisters();
+	bool allocateRegistersAttempt();
 	bool generateCode();
 	bool writeOutput();
 
