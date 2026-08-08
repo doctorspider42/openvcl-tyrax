@@ -83,7 +83,6 @@ private:
 	bool branchNeedsPreBubble( const Token& token ) const;
 	void padForBranchPreBubble( const Token& token );
 	void padForClipFlagWindow( const Token& a, const Token* b );
-	bool clipReadIsPositional( const Token& token ) const;
 	unsigned int emittedRowsSinceClipWrite() const;
 	bool slotCanBecomeBranchDelayFiller( const VuScheduledIssueSlot& slot,
 	                                     const Token& branch ) const;

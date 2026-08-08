@@ -735,6 +735,15 @@ bool vuClipReadIsFullWindow( const Token& token )
 	// 0xFFFFFF the whole register, and both mean "is anything outside". A mask that
 	// names particular entries - one bit, or several OR-ed - is reading positions.
 	//
+	// POSITION-INDEPENDENT IS NOT LATENCY-INDEPENDENT, and reading this predicate as
+	// if it were is the third miscompile of this family. "Which entry the bits sit in
+	// does not matter" is a statement about WHERE a judgement is, not about WHETHER it
+	// has arrived; 0x3FFFF is three entries wide, so a read taken before its own CLIP
+	// has landed does not get a partly-settled answer, it gets the window shifted by a
+	// whole vertex - the previous vertex's verdict, wearing this one's name. Both
+	// callers therefore make every reader wait, and consult this only to choose
+	// between the hardware minimum and the larger scheduling figure.
+	//
 	// An fcget takes no mask at all; it copies the register, so every position of it
 	// matters and it is never full-window by this test (the loop below finds no
 	// immediate and falls through to false).
@@ -787,11 +796,17 @@ bool vuStatusReadNeedsLastWriter( const Token& token )
 	return true;
 }
 
-// --exempt-full-clip-masks. The emitter has exempted full-window reads from clip
-// padding since padForClipFlagWindow was written; the scheduler never did, and held
-// every reader vuClipFlagSchedulingLatency() cycles behind its CLIP regardless of
-// mask. The scheduler being the more conservative of the two means the emitter's
-// exemption could not pay: the reader had already been pushed away.
+// --exempt-full-clip-masks. NARROWED, and inert at the shipped latencies.
+//
+// It used to mean "a full-window reader need not wait at all", matching an exemption
+// the emitter had made since padForClipFlagWindow was written. Both were wrong in the
+// same way - see vuClipReadIsFullWindow - and both are gone. What is left is the only
+// part of the exemption that was ever sound: a position-independent reader needs no
+// more than vuClipFlagVisibilityLatency(), the wait for its own six bits to land,
+// while a positional one also needs vuClipFlagSchedulingLatency(), the spread that
+// keeps the rest of the window where source order put it. Those two are both 4 today,
+// so the flag changes no byte; it stays because they are separately calibrated and
+// are not required to stay equal.
 void setVuExemptFullClipMasksEnabled( bool enabled )
 {
 	g_exemptFullClipMasks = enabled;

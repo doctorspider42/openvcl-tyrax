@@ -26,19 +26,23 @@ namespace
 		    && (access.implicitWrites & resource) != 0;
 	}
 
-	// Does this token read the CLIP flag in a way that has to wait for its own six
-	// bits to arrive? The emitter has always asked the narrower question - a mask
-	// covering the whole window answers the same from any position, so it does not -
-	// and the scheduler did not ask it at all, which made the scheduler the binding
-	// constraint and left the emitter's exemption unreachable. --exempt-full-clip-masks
-	// brings the two into line; with it off this is the bare readsClip it used to be.
-	bool tokenReadsClipPositionally( const Token& token )
+	// How long after the last CLIP push may this token read the flag? 0 means it does
+	// not read it at all.
+	//
+	// EVERY reader waits. The mask decides how LONG, never whether: a
+	// position-independent mask needs no more than the hardware minimum - its own six
+	// bits have to have LANDED - while a positional one also needs the window to be in
+	// the alignment the source gives it, which is the (never smaller) scheduling
+	// figure. Both are 4, so --exempt-full-clip-masks changes nothing today; it used
+	// to return false here and remove the wait altogether, and that is the miscompile
+	// documented on vuClipReadIsFullWindow.
+	int tokenClipReadLatency( const Token& token )
 	{
 		if( !tokenReadsImplicitResource( token, VU_RESOURCE_CLIP ) )
-			return false;
+			return 0;
 		if( vuExemptFullClipMasksEnabled() && vuClipReadIsFullWindow( token ) )
-			return false;
-		return true;
+			return static_cast<int>( vuClipFlagVisibilityLatency() );
+		return static_cast<int>( vuClipFlagSchedulingLatency() );
 	}
 
 	int bypassLatencyReduction( const std::string& mnemonic, int fallback )
@@ -185,12 +189,14 @@ int VuLatencyTracker::readHazardDelayImpl( const Token& token,
 	const int flagCycle = currentCycle + needed;
 	bool readsMac = tokenReadsImplicitResource( token, VU_RESOURCE_MAC );
 	bool readsStatus = tokenReadsImplicitResource( token, VU_RESOURCE_STATUS );
-	bool readsClip = tokenReadsClipPositionally( token );
+	int clipLatency = tokenClipReadLatency( token );
 	if( partner && partner->operand() )
 	{
 		readsMac = readsMac || tokenReadsImplicitResource( *partner, VU_RESOURCE_MAC );
 		readsStatus = readsStatus || tokenReadsImplicitResource( *partner, VU_RESOURCE_STATUS );
-		readsClip = readsClip || tokenReadsClipPositionally( *partner );
+		const int partnerClipLatency = tokenClipReadLatency( *partner );
+		if( partnerClipLatency > clipLatency )
+			clipLatency = partnerClipLatency;
 	}
 
 	// How long after its producer a flag may be read. 4 by default;
@@ -214,11 +220,10 @@ int VuLatencyTracker::readHazardDelayImpl( const Token& token,
 		if( flagLatency - gap > flagDelay )
 			flagDelay = flagLatency - gap;
 	}
-	if( readsClip )
+	if( clipLatency > 0 )
 	{
 		// Not flagLatency: the CLIP window is positional, so --sce-latencies must
 		// not shorten this wait (see setVuClipFlagVisibilityLatency).
-		const int clipLatency = static_cast<int>( vuClipFlagSchedulingLatency() );
 		const int gap = flagCycle - m_lastClipwCycle;
 		if( clipLatency - gap > flagDelay )
 			flagDelay = clipLatency - gap;

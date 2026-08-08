@@ -39,9 +39,9 @@ reference:
 
 | | Sony `vcl` | this fork | |
 |---|---:|---:|---|
-| engine resident VU1 set | 2028 words | **1992** | ceiling is 2042; upstream did not fit at all |
-| engine corpus, all 25 programs | 3982 words | **3900** | under Sony |
-| generated corpus, 45 programs | 9264 words | **9216** | under Sony too |
+| engine resident VU1 set | 2028 words | **1998** | ceiling is 2042; upstream did not fit at all |
+| engine corpus, all 25 programs | 3982 words | **3908** | under Sony |
+| generated corpus, 45 programs | 9264 words | **9242** | under Sony too |
 | programs that compile | 45 / 45 | **45 / 45** | upstream at the fork point: 23 |
 | frame rate, VU1-bound terrain scene | 100.4 FPS | **99.5** | **parity** |
 | frame rate, model-heavy scene | 87.84 | **87.38** | **parity** |

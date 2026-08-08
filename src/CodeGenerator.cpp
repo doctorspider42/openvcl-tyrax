@@ -1728,15 +1728,6 @@ unsigned int CodeGenerator::emittedWordCount() const
 	return rows + ( rows & 1u );
 }
 
-bool CodeGenerator::clipReadIsPositional( const Token& token ) const
-{
-	// The mask test itself is vuClipReadIsFullWindow(), in VuSchedulingRules, because
-	// the scheduler needs the same answer - see --exempt-full-clip-masks. It used to
-	// live here alone, and the scheduler disagreeing with it is exactly the bug that
-	// moved it.
-	return !vuClipReadIsFullWindow( token );
-}
-
 void CodeGenerator::padForClipFlagWindow( const Token& a, const Token* b )
 {
 	const unsigned int latency = vuClipFlagVisibilityLatency();
@@ -1755,27 +1746,34 @@ void CodeGenerator::padForClipFlagWindow( const Token& a, const Token* b )
 			continue;
 		if( access.implicitReads & VU_RESOURCE_CLIP )
 		{
-			// Only a POSITIONAL read has to wait. The window holds six bits per CLIP,
-			// so a mask that covers the whole thing ("is anything outside", 0x3FFFF
-			// for three vertices) gets the same answer whichever position the bits
-			// are in, and SCE reads those adjacent to their CLIP. Padding them is
-			// pure loss: it costs this engine's five cull programs 22 instructions
-			// and changes nothing they compute.
+			// EVERY reader of the flag waits, whatever its mask.
 			//
-			// What this does NOT claim is that SCE keeps its distance for positional
-			// reads. Measured over 70 programs, SCE puts 89 positional readers closer
-			// than three rows to the nearest preceding CLIP: five in each of the
-			// sixteen `_cl` programs (masks 15 and 10), three in each of the two
-			// billboards (mask 63, one of them in the row directly below), and one in
-			// each of three stapip_clip_* . SCE can, because it pairs a reader with the CLIP
-			// four rows back rather than the nearest one: it models the register as
-			// the 24-bit shift window it is, and keeps two or three CLIPs in flight.
-			// We do not model that, so the distance from the nearest one is the only
-			// safe reading of the window we have, and for a positional mask we keep
-			// it. An earlier version of this comment asserted SCE never went below
-			// three rows; it was not measured, and it is false.
-			if( clipReadIsPositional( *pair[k] ) )
-				readsClip = true;
+			// This used to exempt a full-window mask, on the argument that the window
+			// holds six bits per CLIP so a mask covering the whole thing ("is anything
+			// outside", 0x3FFFF for three vertices) gets the same answer whichever
+			// position the bits are in. That argument is about WHICH ENTRY a
+			// judgement occupies. It says nothing about WHETHER THE NEWEST ONE HAS
+			// ARRIVED, and 0x3FFFF is three entries wide: read one row after its CLIP
+			// the mask covers a window shifted by a whole vertex, so the answer is
+			// about the PREVIOUS vertex. In this engine's cull programs that answer
+			// is the ADC bit of the vertex that completes a triangle, so the triangle
+			// that gets drawn is the one judged by its own first two vertices and the
+			// PREVIOUS triangle's third - a frustum test that can pass a vertex the
+			// pipeline never clips. Measured by p8-flagorder.py: 23 readers over 14
+			// programs, and SCE does it in none of them.
+			//
+			// What this does NOT claim is that SCE keeps four rows. Measured over 70
+			// programs, SCE puts 89 positional readers closer than three rows to the
+			// nearest preceding CLIP: five in each of the sixteen `_cl` programs
+			// (masks 15 and 10), three in each of the two billboards (mask 63, one of
+			// them in the row directly below), and one in each of three stapip_clip_*.
+			// SCE can, for two reasons we cannot copy: it pairs a reader with the CLIP
+			// four rows back rather than the nearest one - modelling the register as
+			// the 24-bit shift window it is, with two or three CLIPs in flight - and
+			// it counts the cycles the hardware will stall on rows it did not pad,
+			// which it writes down (STALL_LATENCY ?N) and we neither write down nor
+			// model. Rows are the only measure we have, and four of them is the floor.
+			readsClip = true;
 		}
 		if( access.implicitWrites & VU_RESOURCE_CLIP )
 			writesClip = true;
