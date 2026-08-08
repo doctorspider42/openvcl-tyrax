@@ -52,14 +52,44 @@ enum VuInstructionFlags
 
 enum VuResourceFlags
 {
-	VU_RESOURCE_NONE  = 0,
-	VU_RESOURCE_ACC   = 1 << 0,
-	VU_RESOURCE_I     = 1 << 1,
-	VU_RESOURCE_Q     = 1 << 2,
-	VU_RESOURCE_P     = 1 << 3,
-	VU_RESOURCE_R     = 1 << 4,
-	VU_RESOURCE_MAC   = 1 << 5,
-	VU_RESOURCE_CLIP  = 1 << 6
+	VU_RESOURCE_NONE   = 0,
+	VU_RESOURCE_ACC    = 1 << 0,
+	VU_RESOURCE_I      = 1 << 1,
+	VU_RESOURCE_Q      = 1 << 2,
+	VU_RESOURCE_P      = 1 << 3,
+	VU_RESOURCE_R      = 1 << 4,
+	VU_RESOURCE_MAC    = 1 << 5,
+	VU_RESOURCE_CLIP   = 1 << 6,
+	VU_RESOURCE_STATUS = 1 << 7
+};
+
+// Resources whose writes ACCUMULATE instead of replacing: a second write does not
+// retire the first, it merges with it, so two writers commute and there is no
+// write-after-write hazard between them at all.
+//
+// The status register is the one. Its sticky half (ZS/SS/US/OS/IS/DS, bits 6..11)
+// is OR-ed into by every FMAC and by DIV/SQRT/RSQRT, and only FSSET clears it - so
+// modelling status as an ordinary register would be wrong in the expensive
+// direction (an FMAC's contribution deleted or hoisted past a reader) AND in the
+// cheap one (a WAW edge between every pair of FMACs, which under the pairwise
+// dependency builder would serialise every program that contains one `fsand`).
+//
+// Two things still order accumulating writes, and they are NOT WAW:
+//   * every contributor since the last clear must precede a reader (RAW), and a
+//     reader must precede every later contributor (WAR) - both pairwise tests
+//     already cover this once the table declares the reads and writes;
+//   * FSSET clears, so it is declared read-AND-write of the resource. That single
+//     declaration turns it into a hard barrier under the same RAW/WAR tests,
+//     without any test having to know what a "clear" is - the same trick that
+//     makes RNEXT/RXOR correct.
+//
+// The non-sticky half (Z/S/U/O/I/D, bits 0..5) IS last-writer-wins, and that is
+// modelled where instructions actually get reordered wholesale - see
+// addAccumulatingImplicitFlagDependencies() in VuSchedulerAnalysis.cpp, which pins
+// the last contributor before a reader whose mask names one of those bits.
+enum VuAccumulatingResourceFlags
+{
+	VU_RESOURCE_ACCUMULATING = VU_RESOURCE_STATUS
 };
 
 enum VuMemoryKind

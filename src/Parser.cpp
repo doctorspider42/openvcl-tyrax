@@ -2055,6 +2055,7 @@ bool Parser::tokenize()
 	// emit is worse than no diagnostic.
 	setVuScheduleFlagReadersEnabled( m_cmdLine.scheduleFlagReaders() );
 	setVuFmacInterlockEnabled( m_cmdLine.fmacInterlock() );
+	setVuPairBestOfCyclesEnabled( m_cmdLine.pairBestOfCycles() );
 	setVuFlagVisibilityLatency( m_cmdLine.sceLatencies() ? 1u : 4u );
 	setVuClipFlagVisibilityLatency( 4u );
 	setVuClipFlagSchedulingLatency( 4u );

@@ -27,6 +27,10 @@ bool isVuMinii( const std::string& name );
 bool isVuLoadToMiniiBypassProducer( const std::string& name );
 
 bool isVuMacReader( const std::string& name );
+// FSAND/FSEQ/FSOR. Split out of isVuMacReader(), which used to list them while the
+// instruction table declared them as reading nothing - two answers to one question.
+bool isVuStatusReader( const std::string& name );
+bool isVuMacOrStatusReader( const std::string& name );
 bool isVuClipReader( const std::string& name );
 bool isVuClipw( const std::string& name );
 
@@ -46,7 +50,20 @@ void collectVuRegisterWriteKeys( const Token& token, std::list<std::string>& wri
 bool isVuZeroMoveFromVf00( const Token& token );
 bool isVuMoveAsUpperMaxCandidate( const Token& token );
 bool vuTokenListReadsMac( const std::list<Token>& tokens );
+bool vuTokenListReadsStatus( const std::list<Token>& tokens );
 bool vuTokenListReadsClip( const std::list<Token>& tokens );
+
+// The hardware resource an `out_hw_*`/`in_hw_*` directive names: the program's
+// contract with whatever runs next, so a resource one of them mentions is live
+// even when no instruction in the program touches it.
+//
+// This lives here, and not in the dead-write pass where it was written, because
+// the dead-write pass was the only thing honouring it. The SCHEDULER decided the
+// same question from in-program readers alone, so a program declaring
+// `out_hw_clip` had its `clipw` correctly kept and then permuted - and the CLIP
+// window is positional, so permuting them changes what the successor reads. One
+// question, one answer, one place.
+unsigned int vuDeclaredHardwareResource( const Token& token );
 
 bool isVuPlainMemoryStore( const Token& token );
 bool isVuPlainMemoryLoad( const Token& token );
@@ -65,6 +82,24 @@ bool vuScheduleFlagReadersEnabled();
 // emitted nop words. Same cycles, smaller program.
 void setVuFmacInterlockEnabled( bool enabled );
 bool vuFmacInterlockEnabled();
+
+// --pair-best-of-cycles: give --pair-best-of-many a second copy of every ready
+// strategy whose PARTNER FILTER asks the cycle question instead of the word one,
+// and let a segment take it when it is strictly faster and no larger.
+//
+// The filter it fixes: under --fmac-interlock the filter asks
+// manualReadHazardDelay, which reports 0 for every VF operand still in flight
+// because the hardware stalls by itself. So a lower-pipe token four rows behind
+// its producer looks free, is paired onto a row that was ready NOW, and holds
+// the primary with it. That is why openvcl puts `sq X` on the row after
+// `ftoi4 X, X` and SCE drains its stores four rows later for nothing.
+//
+// Selection is bounded on purpose: the word winner is still chosen over the
+// SHIPPED table alone, and the cycle winner only takes the segment when its
+// emitted size is <= the word winner's. The flag therefore cannot grow a
+// program - VU1 micro memory is a hard ceiling and a frame rate is not.
+void setVuPairBestOfCyclesEnabled( bool enabled );
+bool vuPairBestOfCyclesEnabled();
 
 // How many cycles after its producer the MAC/CLIP flags may be read. Default 4.
 // --sce-latencies sets 1, which is what SCE's vcl emits: over the 25
@@ -92,6 +127,14 @@ unsigned int vuClipFlagSchedulingLatency();
 // the scheduler kept them four cycles from their CLIP, so the scheduler's caution
 // was the binding one. Two copies of this test is how that happens again.
 bool vuClipReadIsFullWindow( const Token& token );
+
+// The status register's equivalent question, and the one that decides how much an
+// accumulating resource costs. A reader whose mask names only the sticky bits
+// (ZS/SS/US/OS/IS/DS) needs every contributor since the last FSSET to be behind it
+// and nothing more; a reader that names a non-sticky bit (Z/S/U/O/I/D) is asking
+// about the last contributor specifically, and that one has to stay last. See
+// addAccumulatingImplicitFlagDependencies() in VuSchedulerAnalysis.cpp.
+bool vuStatusReadNeedsLastWriter( const Token& token );
 
 // --exempt-full-clip-masks: let the SCHEDULER make the same exemption. Off by
 // default; with it on, a full-window reader no longer waits
@@ -329,6 +372,13 @@ bool vuSinkLoadsPastBranchesEnabled();
 // nothing observes either. Iterated to a fixed point, so the `loi` feeding a
 // deleted reader goes with it. Only aliases are candidates: a literal VFxx an
 // author named by number may be an interface with the outside world.
+//
+// CLIP is a 24-bit shift register of four 6-bit judgements, so one CLIP write
+// does not kill the previous one - it survives three more pushes, and a
+// positional mask still reads it. That is not optional and is not a flag: both
+// this pass and the dependency builder model it unconditionally. See
+// implicitWriteIsObservable() in RegisterAllocator.cpp and
+// addPreciseImplicitFlagDependencies() in VuSchedulerAnalysis.cpp.
 void setVuDropDeadWritesEnabled( bool enabled );
 bool vuDropDeadWritesEnabled();
 void setVuShowPairMissesEnabled( bool enabled );

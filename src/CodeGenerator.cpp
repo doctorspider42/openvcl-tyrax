@@ -1050,7 +1050,12 @@ bool CodeGenerator::beginProcess(const std::list<Token>& tokens)
 	}
 	if( !appliedGenericSoftwarePipeline )
 		fillPreIncrementStoreBranchDelaySlots(workTokens);
-	const bool macFlagsDead = !vuTokenListReadsMac(workTokens);
+	// An upper move is emitted as an FMAC (maxx), which produces flags a plain move
+	// does not - so it is only free when nothing reads them. The status register is
+	// as much "them" as MAC is, and the two used to be one test only because
+	// isVuMacReader() listed the fs* readers.
+	const bool macFlagsDead = !vuTokenListReadsMac(workTokens)
+	                       && !vuTokenListReadsStatus(workTokens);
 	m_enableUpperMoves = macFlagsDead;
 	m_ignoredImplicitWawResources = VU_RESOURCE_NONE;
 
@@ -1597,7 +1602,7 @@ bool CodeGenerator::scheduledSlotsFeedBranch(
 			if( vuBranchInterlockEnabled()
 			    && ( isVuPlainMemoryLoad( *tokens[t] )
 			         || isVuClipReader( lowerVuTokenName( *tokens[t] ) )
-			         || isVuMacReader( lowerVuTokenName( *tokens[t] ) ) ) )
+			         || isVuMacOrStatusReader( lowerVuTokenName( *tokens[t] ) ) ) )
 				continue;
 			std::list<std::string> writes;
 			collectVuRegisterWriteKeys( *tokens[t], writes );

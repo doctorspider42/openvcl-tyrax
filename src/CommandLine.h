@@ -58,6 +58,7 @@ public:
 	bool knownLoopOptimizations() const;
 	bool scheduleFlagReaders() const;
 	bool fmacInterlock() const;
+	bool pairBestOfCycles() const;
 	bool sceLatencies() const;
 	bool emitDelayFillers() const;
 	bool branchInterlock() const;
@@ -155,6 +156,7 @@ private:
 		ENABLE_KNOWN_LOOP_OPTIMIZATIONS,
 		SCHEDULE_FLAG_READERS,
 		FMAC_INTERLOCK,
+		PAIR_BEST_OF_CYCLES,
 		SCE_LATENCIES,
 		EMIT_DELAY_FILLERS,
 		BRANCH_INTERLOCK,
@@ -233,6 +235,7 @@ private:
 	bool m_knownLoopOptimizations;
 	bool m_scheduleFlagReaders;
 	bool m_fmacInterlock;
+	bool m_pairBestOfCycles;
 	bool m_sceLatencies;
 	bool m_emitDelayFillers;
 	bool m_branchInterlock;

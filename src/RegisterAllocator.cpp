@@ -20,6 +20,7 @@
 #include <set>
 #include <vector>
 #include <stdlib.h>
+#include <ctype.h>
 #include <assert.h>
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1850,24 +1851,6 @@ namespace
 		}
 	}
 
-	// The hardware resource an `out_hw_*`/`in_hw_*` directive names. Those are
-	// the program's contract with whatever runs next, so a resource one of them
-	// mentions is read even when no instruction reads it.
-	unsigned int declaredHardwareResource( const Token& token )
-	{
-		if( !token.operand() )
-			return VU_RESOURCE_NONE;
-		const std::string& n = token.operand()->name();
-		if( n == "out_hw_acc" || n == "in_hw_acc" )       return VU_RESOURCE_ACC;
-		if( n == "out_hw_i" || n == "in_hw_i" )           return VU_RESOURCE_I;
-		if( n == "out_hw_q" || n == "in_hw_q" )           return VU_RESOURCE_Q;
-		if( n == "out_hw_p" || n == "in_hw_p" )           return VU_RESOURCE_P;
-		if( n == "out_hw_r" || n == "in_hw_r" )           return VU_RESOURCE_R;
-		if( n == "out_hw_clip" || n == "in_hw_clip" )     return VU_RESOURCE_CLIP;
-		if( n == "out_hw_status" || n == "in_hw_status" ) return VU_RESOURCE_MAC;
-		return VU_RESOURCE_NONE;
-	}
-
 	// Can this token be considered for deletion at all? Everything with an effect
 	// the destination register does not describe is out: stores and xgkick, the
 	// auto-incrementing loads, branches and anything with a delay slot, a token
@@ -1900,6 +1883,53 @@ namespace
 		return true;
 	}
 
+	// Is this token a CLIP *push* rather than a CLIP overwrite? CLIP/CLIPw/CLIPLw
+	// shift six new judgement bits into a 24-bit window and move the previous
+	// three entries up; FCSET replaces the whole register. Matched on the
+	// mnemonic because that is what survives to this point - the opcode table has
+	// no "is a shift" bit and adding one would touch every entry.
+	bool tokenIsClipPush( const Token& token )
+	{
+		if( !token.operand() )
+			return false;
+		std::string name = token.operand()->name();
+		if( name.size() < 4 )
+			return false;
+		for( std::string::size_type i = 0; i < 4; ++i )
+			name[i] = static_cast<char>( tolower( static_cast<unsigned char>( name[i] ) ) );
+		return name.compare( 0, 4, "clip" ) == 0;
+	}
+
+	// The CLIP window is four 6-bit entries deep, so a judgement pushed here is
+	// still readable through the next three pushes and gone after the fourth.
+	const unsigned int VU_CLIP_WINDOW_ENTRIES = 4;
+
+	// Which fields of ACC a token writes. ACC is four independent 32-bit lanes and
+	// an FMAC destination mask selects among them, so `mula.x acc` and
+	// `mula.yzw acc` write disjoint halves of it and neither retires the other.
+	// vuWriteFieldMask() cannot answer this: it reports the whole register for
+	// anything that is not a FLOAT_REGISTER argument, and ACC is its own argument
+	// type. Same precedence it uses - the token's destination mask first, then the
+	// argument's own, then all four.
+	unsigned int accumulatorWriteFieldMask( const Token& token )
+	{
+		unsigned int fields = token.fields();
+		if( fields == 0 )
+		{
+			for( std::list<Token::Argument>::const_iterator a = token.arguments().begin();
+			     a != token.arguments().end(); ++a )
+			{
+				if( a->type() != Token::Argument::ACCUMULATOR )
+					continue;
+				if( !(a->flags() & Token::Argument::WRITE) )
+					continue;
+				fields = a->fields();
+				break;
+			}
+		}
+		return fields == 0 ? ALL_FIELDS : fields;
+	}
+
 	// Does anything observe this token's write to `resources`? Walks forward from
 	// it: a reader says yes, another writer of the same resource says no, and
 	// anything the walk cannot follow - a label, a branch, a preprocessor
@@ -1910,11 +1940,36 @@ namespace
 	// all, which is what makes this useful: in a program with no MAC reader every
 	// FMAC's flag write drops out before the walk starts, and the walk only has
 	// to be right about the resources somebody really does read.
+	//
+	// CLIP is the one resource where "another writer says no" is WRONG, and it
+	// is not behind a flag because it is not an option: a `clipw` does not
+	// overwrite the previous judgement, it shifts it up one 6-bit entry, where a
+	// positional reader (`fcand VI01,0x3CA3CA` names all four entries) still
+	// sees it. Only the fourth subsequent push retires it; anything else that
+	// writes CLIP (FCSET) really does replace the register and kills it at once.
+	//
+	// This shipped for one commit as --clip-window-liveness and was folded in
+	// here, because a --drop-dead-writes build without it deletes four of the
+	// seven `clipw` in every stapip_clip_* program, and the "entirely inside,
+	// skip clipping" branch then reads the previous triangle's judgements - a
+	// miscompile no pixel or GIF-packet comparison can see.
+	//
+	// ACC is the third resource where "another writer says no" needs a
+	// qualification, and it is a narrower one than CLIP's: ACC really is replaced
+	// by a later write, but only in the FIELDS that write names. `mula.x acc`
+	// followed by `mula.yzw acc` and then one `madd` reading all four had the FIRST
+	// deleted, because the walk saw an ACC writer and never asked which lanes it
+	// covered. `pendingAccFields` is that question - the kill only counts once the
+	// later writes between here and the next reader cover every field this one
+	// wrote.
 	bool implicitWriteIsObservable( std::list<Token>::const_iterator token,
 	                                std::list<Token>::const_iterator end,
-	                                unsigned int resources )
+	                                unsigned int resources,
+	                                unsigned int accFields )
 	{
 		unsigned int pending = resources;
+		unsigned int pendingAccFields = accFields;
+		unsigned int clipPushes = 0;
 		for( ++token; token != end && pending != VU_RESOURCE_NONE; ++token )
 		{
 			if( !token->operand() )
@@ -1932,7 +1987,30 @@ namespace
 			if( token->operand()->unit() == Operand::BRU )
 				return true;
 
-			pending &= ~access.implicitWrites;
+			unsigned int kills = access.implicitWrites;
+			// An ACCUMULATING write never retires an earlier one: two FMACs both OR
+			// into the status register's sticky half, so the first one's contribution
+			// is still there for a reader after the second. The only thing that does
+			// retire it is FSSET, and FSSET is declared as READING the resource too,
+			// so the `implicitReads & pending` test above has already returned true
+			// for it by the time control gets here.
+			kills &= ~static_cast<unsigned int>( VU_RESOURCE_ACCUMULATING );
+			if( (kills & VU_RESOURCE_CLIP) && tokenIsClipPush( *token ) )
+			{
+				// A push only retires the entry once it has shifted out of the
+				// window; until then the old judgement is still readable.
+				if( ++clipPushes < VU_CLIP_WINDOW_ENTRIES )
+					kills &= ~VU_RESOURCE_CLIP;
+			}
+			if( kills & VU_RESOURCE_ACC )
+			{
+				// Only the lanes this write covers are retired. What is left over is
+				// still the earlier write's, and still readable.
+				pendingAccFields &= ~accumulatorWriteFieldMask( *token );
+				if( pendingAccFields != 0 )
+					kills &= ~VU_RESOURCE_ACC;
+			}
+			pending &= ~kills;
 		}
 		return pending != VU_RESOURCE_NONE;
 	}
@@ -1977,7 +2055,7 @@ unsigned int RegisterAllocator::dropDeadRegisterWrites( std::list<Token>& tokens
 			// immediate whose spelling is the alias name, not a register operand.
 			if( t->operand()->flags() & Operand::PREPROCESSOR )
 			{
-				resourcesRead |= declaredHardwareResource( *t );
+				resourcesRead |= vuDeclaredHardwareResource( *t );
 				for( std::list<Token::Argument>::const_iterator a = t->arguments().begin();
 				     a != t->arguments().end(); ++a )
 				{
@@ -2041,7 +2119,8 @@ unsigned int RegisterAllocator::dropDeadRegisterWrites( std::list<Token>& tokens
 			{
 				const unsigned int live = access.implicitWrites & resourcesRead;
 				if( live != VU_RESOURCE_NONE
-				    && implicitWriteIsObservable( t, tokens.end(), live ) )
+				    && implicitWriteIsObservable( t, tokens.end(), live,
+				                                  accumulatorWriteFieldMask( *t ) ) )
 					dead = false;
 			}
 

@@ -58,6 +58,7 @@ void VuLatencyTracker::reset()
 	m_qReadyCycle = -10;
 	m_pReadyCycle = -10;
 	m_lastFMACCycle = -10;
+	m_lastStatusCycle = -10;
 	m_lastClipwCycle = -10;
 	m_registerReadyCycle.clear();
 	m_registerProducerMnemonic.clear();
@@ -90,7 +91,7 @@ namespace
 		return mnemonic.compare( 0, 3, "ilw" ) == 0
 		    || mnemonic.compare( 0, 2, "lq" ) == 0
 		    || isVuClipReader( mnemonic )
-		    || isVuMacReader( mnemonic );
+		    || isVuMacOrStatusReader( mnemonic );
 	}
 	bool isFloatRegisterKey( const std::string& key )
 	{
@@ -183,10 +184,12 @@ int VuLatencyTracker::readHazardDelayImpl( const Token& token,
 
 	const int flagCycle = currentCycle + needed;
 	bool readsMac = tokenReadsImplicitResource( token, VU_RESOURCE_MAC );
+	bool readsStatus = tokenReadsImplicitResource( token, VU_RESOURCE_STATUS );
 	bool readsClip = tokenReadsClipPositionally( token );
 	if( partner && partner->operand() )
 	{
 		readsMac = readsMac || tokenReadsImplicitResource( *partner, VU_RESOURCE_MAC );
+		readsStatus = readsStatus || tokenReadsImplicitResource( *partner, VU_RESOURCE_STATUS );
 		readsClip = readsClip || tokenReadsClipPositionally( *partner );
 	}
 
@@ -199,6 +202,15 @@ int VuLatencyTracker::readHazardDelayImpl( const Token& token,
 	if( readsMac )
 	{
 		const int gap = flagCycle - m_lastFMACCycle;
+		if( flagLatency - gap > flagDelay )
+			flagDelay = flagLatency - gap;
+	}
+	// The status flags become visible on the same schedule as the MAC flags, and
+	// they have a producer of their own: DIV/SQRT/RSQRT set the D and I bits without
+	// touching MAC, so m_lastFMACCycle is not the cycle to measure from.
+	if( readsStatus )
+	{
+		const int gap = flagCycle - m_lastStatusCycle;
 		if( flagLatency - gap > flagDelay )
 			flagDelay = flagLatency - gap;
 	}
@@ -221,6 +233,8 @@ void VuLatencyTracker::recordWrites( const Token& token, int issueCycle, bool fo
 {
 	if( forceMacFlagWrite || tokenWritesImplicitResource( token, VU_RESOURCE_MAC ) )
 		m_lastFMACCycle = issueCycle;
+	if( forceMacFlagWrite || tokenWritesImplicitResource( token, VU_RESOURCE_STATUS ) )
+		m_lastStatusCycle = issueCycle;
 	if( tokenWritesImplicitResource( token, VU_RESOURCE_CLIP ) )
 		m_lastClipwCycle = issueCycle;
 

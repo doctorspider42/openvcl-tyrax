@@ -76,10 +76,17 @@ namespace
 		implicitResources( earlier, earlierReads, earlierWrites );
 		implicitResources( later, laterReads, laterWrites );
 
-		if( earlierWrites & (laterReads | laterWrites) )
+		if( earlierWrites & laterReads )
 			return true;
 
-		if( laterWrites & earlierWrites )
+		// Two writes of an ACCUMULATING resource are not a hazard: they merge, so
+		// there is no order between them to preserve. Without this the status
+		// declarations alone would refuse to pair `mul` with `div` - both contribute
+		// to the status register - and refuse every other upper/lower row whose two
+		// halves happen to touch it. Everything that DOES order accumulating writes
+		// goes through a read: a reader on either side is caught by the RAW and WAR
+		// tests around this one, and FSSET is declared a reader for that reason.
+		if( laterWrites & earlierWrites & ~static_cast<unsigned int>( VU_RESOURCE_ACCUMULATING ) )
 			return true;
 
 		return (laterWrites & earlierReads) != 0;
@@ -308,12 +315,28 @@ bool isVuLoadToMiniiBypassProducer( const std::string& name )
 	return info && (info->bypassFlags & VU_BYPASS_LOAD_TO_MINII) != 0;
 }
 
+// The MAC flag register and the status register are two different registers, and
+// this used to answer for both: `fsand`/`fseq`/`fsor` were listed here as MAC
+// readers while the instruction table declared them as reading nothing at all, so
+// the compiler gave two different answers to "does this read MAC?" depending on
+// which of the two it asked - and VuLatencyTracker asked the table, the one that
+// said no. The table now declares VU_RESOURCE_STATUS and this list answers only
+// about MAC; every caller that wanted "is this a flag reader" asks both.
 bool isVuMacReader( const std::string& name )
 {
 	return name == "fmand" || name == "fmeq" || name == "fmor"
-	    || name == "fsand" || name == "fseq" || name == "fsor"
-	    || name == "FMAND" || name == "FMEQ" || name == "FMOR"
+	    || name == "FMAND" || name == "FMEQ" || name == "FMOR";
+}
+
+bool isVuStatusReader( const std::string& name )
+{
+	return name == "fsand" || name == "fseq" || name == "fsor"
 	    || name == "FSAND" || name == "FSEQ" || name == "FSOR";
+}
+
+bool isVuMacOrStatusReader( const std::string& name )
+{
+	return isVuMacReader( name ) || isVuStatusReader( name );
 }
 
 bool isVuClipReader( const std::string& name )
@@ -446,6 +469,35 @@ bool vuTokenListReadsMac( const std::list<Token>& tokens )
 	return false;
 }
 
+bool vuTokenListReadsStatus( const std::list<Token>& tokens )
+{
+	for( std::list<Token>::const_iterator i = tokens.begin(); i != tokens.end(); ++i )
+	{
+		if( i->operand() && isVuStatusReader(i->operand()->name()) )
+			return true;
+	}
+	return false;
+}
+
+unsigned int vuDeclaredHardwareResource( const Token& token )
+{
+	if( !token.operand() )
+		return VU_RESOURCE_NONE;
+	if( !(token.operand()->flags() & Operand::PREPROCESSOR) )
+		return VU_RESOURCE_NONE;
+	const std::string& n = token.operand()->name();
+	if( n == "out_hw_acc" || n == "in_hw_acc" )       return VU_RESOURCE_ACC;
+	if( n == "out_hw_i" || n == "in_hw_i" )           return VU_RESOURCE_I;
+	if( n == "out_hw_q" || n == "in_hw_q" )           return VU_RESOURCE_Q;
+	if( n == "out_hw_p" || n == "in_hw_p" )           return VU_RESOURCE_P;
+	if( n == "out_hw_r" || n == "in_hw_r" )           return VU_RESOURCE_R;
+	if( n == "out_hw_clip" || n == "in_hw_clip" )     return VU_RESOURCE_CLIP;
+	// This used to answer VU_RESOURCE_MAC, which was the third copy of the
+	// status/MAC conflation: the status register is its own resource now.
+	if( n == "out_hw_status" || n == "in_hw_status" ) return VU_RESOURCE_STATUS;
+	return VU_RESOURCE_NONE;
+}
+
 bool vuTokenListReadsClip( const std::list<Token>& tokens )
 {
 	for( std::list<Token>::const_iterator i = tokens.begin(); i != tokens.end(); ++i )
@@ -564,7 +616,8 @@ bool isVuReadyScheduleCandidate( const Token& token )
 	// known-loop-optimisation path decides: with a cheaper unpipelined estimate,
 	// that path stops software-pipelining the loops its own tests pin down. Off by
 	// default, nothing moves for anyone who does not ask.
-	if( !vuScheduleFlagReadersEnabled() && (access.implicitReads & (VU_RESOURCE_MAC | VU_RESOURCE_CLIP)) )
+	if( !vuScheduleFlagReadersEnabled()
+	    && (access.implicitReads & (VU_RESOURCE_MAC | VU_RESOURCE_CLIP | VU_RESOURCE_STATUS)) )
 		return false;
 
 	return true;
@@ -574,6 +627,7 @@ namespace
 {
 	bool g_scheduleFlagReaders = false;
 	bool g_fmacInterlock = false;
+	bool g_pairBestOfCycles = false;
 	unsigned int g_flagVisibilityLatency = 4;
 	unsigned int g_clipFlagVisibilityLatency = 4;
 	unsigned int g_clipFlagSchedulingLatency = 4;
@@ -618,6 +672,16 @@ void setVuFmacInterlockEnabled( bool enabled )
 bool vuFmacInterlockEnabled()
 {
 	return g_fmacInterlock;
+}
+
+void setVuPairBestOfCyclesEnabled( bool enabled )
+{
+	g_pairBestOfCycles = enabled;
+}
+
+bool vuPairBestOfCyclesEnabled()
+{
+	return g_pairBestOfCycles;
 }
 
 void setVuFlagVisibilityLatency( unsigned int cycles )
@@ -686,6 +750,41 @@ bool vuClipReadIsFullWindow( const Token& token )
 		return mask == 0 || mask == 0x3FFFFul || mask == 0xFFFFFFul;
 	}
 	return false;      // no mask to judge by: assume the position matters
+}
+
+// Does this status reader depend on WHICH contributor ran last, or only on the set
+// of them? The status register is two registers in one: bits 0..5 (Z S U O I D)
+// describe the last operation and are replaced by every FMAC, bits 6..11
+// (ZS SS US OS IS DS) accumulate until FSSET clears them.
+//
+// A reader whose mask names only sticky bits - `fsand VI01,0x0C00` asks "did
+// anything divide by zero or go invalid since the last fsset" - gets the same
+// answer whatever order the contributors ran in, so it needs nothing but "all of
+// them are behind me". A reader that names a non-sticky bit is asking about the
+// instruction immediately in front of it and the last writer has to stay last.
+//
+// This is the same shape as vuClipReadIsFullWindow: a mask the source already
+// carries, telling the scheduler how much ordering the read actually needs. No
+// mask to judge by (or one that cannot be parsed) means the position matters.
+bool vuStatusReadNeedsLastWriter( const Token& token )
+{
+	const unsigned long VU_STATUS_NON_STICKY_BITS = 0x3Ful;
+
+	for( std::list<Token::Argument>::const_iterator a = token.arguments().begin();
+	     a != token.arguments().end(); ++a )
+	{
+		if( a->type() != Token::Argument::IMMEDIATE )
+			continue;
+		const std::string& text = a->immediate();
+		if( text.empty() )
+			continue;
+		char* endptr = NULL;
+		const unsigned long mask = std::strtoul( text.c_str(), &endptr, 0 );
+		if( endptr == text.c_str() || (endptr && *endptr != '\0') )
+			return true;                 // not a plain literal: assume it matters
+		return (mask & VU_STATUS_NON_STICKY_BITS) != 0;
+	}
+	return true;
 }
 
 // --exempt-full-clip-masks. The emitter has exempted full-window reads from clip
@@ -995,7 +1094,12 @@ bool vuTokenCanMoveBefore( const Token& moved,
 		return false;
 	if( crossedWritesImplicit & movedReadsImplicit )
 		return false;
-	if( (movedWritesImplicit & crossedWritesImplicit & ~ignoredImplicitWawResources) != 0 )
+	// Accumulating writes commute, so a WAW between two of them is not a barrier
+	// here either - see hasImplicitPairDependency. The reads are what order them,
+	// and both read tests are above this line.
+	if( (movedWritesImplicit & crossedWritesImplicit
+	     & ~ignoredImplicitWawResources
+	     & ~static_cast<unsigned int>( VU_RESOURCE_ACCUMULATING )) != 0 )
 		return false;
 
 	if( vuTokensHaveDataDependency(moved, crossed) || vuTokensHaveDataDependency(crossed, moved) )

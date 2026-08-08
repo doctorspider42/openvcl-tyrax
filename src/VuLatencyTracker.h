@@ -50,6 +50,7 @@ private:
 	int m_qReadyCycle;
 	int m_pReadyCycle;
 	int m_lastFMACCycle;
+	int m_lastStatusCycle;
 	int m_lastClipwCycle;
 	std::map<std::string, int> m_registerReadyCycle;
 	std::map<std::string, std::string> m_registerProducerMnemonic;

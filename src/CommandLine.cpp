@@ -77,6 +77,7 @@ CommandLine::CommandLine()
 	m_knownLoopOptimizations = false;
 	m_scheduleFlagReaders = false;
 	m_fmacInterlock = false;
+	m_pairBestOfCycles = false;
 	m_sceLatencies = false;
 	m_emitDelayFillers = false;
 	m_branchInterlock = false;
@@ -150,6 +151,7 @@ CommandLine::CommandLine()
 	m_options.push_back(Option('\0',"enable-known-loop-optimizations",ENABLE_KNOWN_LOOP_OPTIMIZATIONS,false));
 	m_options.push_back(Option('\0',"schedule-flag-readers",SCHEDULE_FLAG_READERS,false));
 	m_options.push_back(Option('\0',"fmac-interlock",FMAC_INTERLOCK,false));
+	m_options.push_back(Option(0,"pair-best-of-cycles",PAIR_BEST_OF_CYCLES,false));
 	m_options.push_back(Option(0,"sce-latencies",SCE_LATENCIES,false));
 	m_options.push_back(Option(0,"emit-delay-fillers",EMIT_DELAY_FILLERS,false));
 	m_options.push_back(Option(0,"branch-interlock",BRANCH_INTERLOCK,false));
@@ -287,6 +289,7 @@ bool CommandLine::parse( int argc, char* argv[] )
 				case ENABLE_KNOWN_LOOP_OPTIMIZATIONS: m_knownLoopOptimizations = true; break;
 				case SCHEDULE_FLAG_READERS: m_scheduleFlagReaders = true; break;
 				case FMAC_INTERLOCK: m_fmacInterlock = true; break;
+				case PAIR_BEST_OF_CYCLES: m_pairBestOfCycles = true; break;
 				case SCE_LATENCIES: m_sceLatencies = true; break;
 				case EMIT_DELAY_FILLERS: m_emitDelayFillers = true; break;
 				case BRANCH_INTERLOCK: m_branchInterlock = true; break;
@@ -401,6 +404,7 @@ void CommandLine::showUsage( std::ostream& stream )
 	stream << "  --enable-known-loop-optimizations  Compile with ps2gl-shaped loop reference emitters." << std::endl;
 	stream << "  --schedule-flag-readers            Let MAC/CLIP flag readers take part in scheduling." << std::endl;
 	stream << "  --fmac-interlock                   Trust the VU FMAC interlock; do not pad VF waits with nops." << std::endl;
+	stream << "  --pair-best-of-cycles              Also try each ready strategy with a stall-aware partner filter; take it when it is faster and no bigger." << std::endl;
 	stream << "  --sce-latencies                    Non-interlocked latencies calibrated to what SCE vcl emits." << std::endl;
 	stream << "  --disable-known-loop-optimizations  Kept for compatibility; generic compilation is the default." << std::endl;
 	stream << "  --enable-generic-software-pipelining  Enable generic software-pipeline rewrites. (Default)" << std::endl;

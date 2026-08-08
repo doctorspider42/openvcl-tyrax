@@ -32,7 +32,8 @@ namespace
 	int pairingHazardDelay( const VuLatencyTracker& latencyTracker,
 	                        const Token& token,
 	                        const Token* partner,
-	                        int currentCycle );
+	                        int currentCycle,
+	                        bool stallAware = false );
 
 	bool containsKey( const std::list<std::string>& keys, const std::string& key )
 	{
@@ -59,11 +60,30 @@ namespace
 		edges.push_back( VuDependencyEdge( before, after, kind ) );
 	}
 
+	// `chainWriters` is the difference between a flag register and a flag SHIFT
+	// register. MAC is a register: only the newest write is visible to a reader,
+	// so the writers before it may run in any order as long as they all precede
+	// it - which is what the writer->finalWriter fan-in expresses. CLIP is a
+	// 24-bit window of the last FOUR judgements, and a positional reader
+	// (`fcand VI01,0x3CA3CA` names all four entries) sees which push landed in
+	// which entry, so the writers must keep their program order among themselves
+	// as well. Chaining is what says that.
 	void addImplicitFlagWriterBarrierEdges( std::vector<VuDependencyEdge>& edges,
 	                                        const std::vector<unsigned int>& writers,
-	                                        bool preserveFinalWriter )
+	                                        bool preserveFinalWriter,
+	                                        bool chainWriters )
 	{
-		if( !preserveFinalWriter || writers.size() < 2 )
+		if( writers.size() < 2 )
+			return;
+
+		if( chainWriters )
+		{
+			for( unsigned int i = 1; i < writers.size(); ++i )
+				addEdge( edges, writers[i - 1], writers[i], VU_DEPENDENCY_RESOURCE_WAW );
+			return;
+		}
+
+		if( !preserveFinalWriter )
 			return;
 
 		const unsigned int finalWriter = writers.back();
@@ -75,6 +95,97 @@ namespace
 		}
 	}
 
+	// An ACCUMULATING resource: writes merge instead of replacing, so there is no
+	// write-after-write hazard between two of them and nothing for a later write to
+	// kill. The status register is the one - every FMAC and every DIV/SQRT/RSQRT
+	// OR-s into its sticky half, and only FSSET clears it.
+	//
+	// This is deliberately NOT addPreciseImplicitFlagDependencies with a flag. That
+	// one models a register: it edges the writers into the LAST writer and only the
+	// last writer into the reader, and it FLUSHES its writer list at every reader,
+	// both of which are right for a value that gets replaced and wrong for one that
+	// gets merged. Here:
+	//
+	//   * every contributor since the last clear is edged into every reader, because
+	//     every one of them is part of the answer the reader gets;
+	//   * a reader does not retire anything, so a second reader is still ordered
+	//     behind the first reader's contributors;
+	//   * there is no writer-to-writer edge at all, which is the whole point - the
+	//     alternative under the pairwise builder is a WAW edge between every pair of
+	//     FMACs, which would serialise every program containing one `fsand`;
+	//   * except that the register's non-sticky half (Z/S/U/O/I/D) IS
+	//     last-writer-wins, so a reader whose mask names one of those bits pins the
+	//     last contributor as the last one. `fsand VI01,0x0C00` - only sticky bits -
+	//     pays nothing for that; `fsand VI01,0x0002` pays exactly what a MAC reader
+	//     pays today. The mask is in the source, so the cost is the program's own.
+	//
+	// FSSET is a hard barrier and needs no case of its own: it is declared reading
+	// AND writing the resource, so the reader branch below edges every contributor
+	// into it, the WAR test in the pairwise builder edges every earlier READER into
+	// it, and the explicit clear->contributor edges here keep later contributors
+	// below it.
+	void addAccumulatingImplicitFlagDependencies( std::vector<VuDependencyEdge>& edges,
+	                                              const std::vector<VuTokenResourceAccess>& accesses,
+	                                              const std::vector<const Token*>& tokens,
+	                                              unsigned int resource )
+	{
+		std::vector<unsigned int> contributors;
+		bool hasClear = false;
+		unsigned int clearIndex = 0;
+
+		for( unsigned int index = 0; index < accesses.size(); ++index )
+		{
+			const bool readsResource = (accesses[index].implicitReads & resource) != 0;
+			const bool writesResource = (accesses[index].implicitWrites & resource) != 0;
+			const bool clearsResource = readsResource && writesResource;
+
+			if( readsResource )
+			{
+				for( std::vector<unsigned int>::const_iterator c = contributors.begin();
+				     c != contributors.end(); ++c )
+					addEdge( edges, *c, index, VU_DEPENDENCY_RESOURCE_RAW );
+
+				if( !clearsResource
+				    && contributors.size() > 1
+				    && resource == VU_RESOURCE_STATUS
+				    && vuStatusReadNeedsLastWriter( *tokens[index] ) )
+					addImplicitFlagWriterBarrierEdges( edges, contributors, true, false );
+			}
+
+			if( clearsResource )
+			{
+				contributors.clear();
+				hasClear = true;
+				clearIndex = index;
+				continue;
+			}
+
+			if( writesResource )
+			{
+				if( hasClear )
+					addEdge( edges, clearIndex, index, VU_DEPENDENCY_RESOURCE_WAW );
+				contributors.push_back( index );
+			}
+		}
+
+		// And there is deliberately NO trailing live-out barrier, which is where an
+		// accumulating resource stops resembling a register. For MAC or CLIP the last
+		// writer in the block produces the value that leaves it, so when the resource
+		// is live out that writer has to stay last. An accumulating resource has no
+		// such writer: the value leaving the block is every contributor since the last
+		// clear, OR-ed, and OR does not care what order it ran in. The sticky bits are
+		// the half of the status register that exists to be read later - that is what
+		// makes them sticky - and any order of contributors hands the successor the
+		// same ones.
+		//
+		// The non-sticky half is not covered by that argument and is not modelled
+		// across the block boundary. It cannot usefully be: `out_hw_status` names one
+		// register with two halves, and "the flags of whichever instruction happens to
+		// be last" is not a contract any scheduler can keep. Inside the block, where
+		// the question IS answerable - the reader's own mask says which half it wants -
+		// it is answered, above.
+	}
+
 	void addPreciseImplicitFlagDependencies( std::vector<VuDependencyEdge>& edges,
 	                                         const std::vector<VuTokenResourceAccess>& accesses,
 	                                         unsigned int resource,
@@ -82,6 +193,10 @@ namespace
 	{
 		std::vector<unsigned int> pendingWriters;
 		const bool preserveLiveOutWriter = (ignoredImplicitWawResources & resource) == 0;
+		// Only CLIP shifts; every other implicit resource here is a plain register.
+		// Not behind a flag: which push landed in which entry is a property of the
+		// hardware, not of a command-line option.
+		const bool chainWriters = resource == VU_RESOURCE_CLIP;
 
 		for( unsigned int index = 0; index < accesses.size(); ++index )
 		{
@@ -92,7 +207,7 @@ namespace
 			{
 				if( !pendingWriters.empty() )
 				{
-					addImplicitFlagWriterBarrierEdges( edges, pendingWriters, true );
+					addImplicitFlagWriterBarrierEdges( edges, pendingWriters, true, chainWriters );
 					addEdge( edges, pendingWriters.back(), index, VU_DEPENDENCY_RESOURCE_RAW );
 				}
 				pendingWriters.clear();
@@ -102,7 +217,12 @@ namespace
 				pendingWriters.push_back( index );
 		}
 
-		addImplicitFlagWriterBarrierEdges( edges, pendingWriters, preserveLiveOutWriter );
+		// The trailing group has no reader after it, so its order is observable
+		// only if the resource is live out - and when it is not, a shift register
+		// is as unordered as a plain one. `preserveLiveOutWriter` gates the chain
+		// for the same reason it gates the fan-in.
+		addImplicitFlagWriterBarrierEdges( edges, pendingWriters, preserveLiveOutWriter,
+		                                   chainWriters && preserveLiveOutWriter );
 	}
 
 	bool memoryOrderRequiresDependency( const VuTokenResourceAccess& beforeAccess,
@@ -130,6 +250,43 @@ namespace
 		return VU_BASIC_BLOCK_TERMINATOR_NONE;
 	}
 
+	// How many modelled cycles one extra instruction word has to buy before
+	// --pair-best-of-cycles will spend it.
+	//
+	// A cycle-cheaper schedule has ALREADY paid for its own extra rows - the trial
+	// cycle count includes them - so at rate 1 the flag takes every net win. It is
+	// not 1 because VU1 micro memory is a hard ceiling and a frame rate is not.
+	// Measured over the ten resident programs, which share one 2042-word upload:
+	//
+	//   rate  1: 2086 words / 2750 cycles   - over the ceiling, unusable
+	//   rate  2: 2016 words / 2847 cycles   - 26 words of headroom left
+	//   rate  4: 1984 words / 2956 cycles
+	//   off:     1968 words / 3010 cycles      (SCE: 2028 / 2433)
+	//
+	// 4 rather than 2, for whoever enables this flag - it is NOT enabled by default,
+	// and the measurement below is why.
+	//
+	// Rate 2 fits the 2042-word ceiling but puts TyraX's 45 generated programs at
+	// 9392 words against SCE's 9264 - handing back a won result to buy cycles. Rate 4
+	// is 9248 (sixteen under SCE) and 1984 resident (58 under the ceiling, 44 under
+	// SCE), for -2.76% modelled cycles against rate 2's -5.91%: 47% of the cycles for
+	// 29% of the words. Rate 1 moves blocks neither reaches, and costs 2086 - over the
+	// hardware ceiling.
+	//
+	// The modelled figure looked like an UNDERSTATEMENT of rate 4, and that argument
+	// was wrong. The model counts each block once, and rate 4 spends its words almost
+	// entirely in the clipper's per-edge and per-emitted-vertex loops - the deepest
+	// code in the corpus - putting `edgeLoop` at exact SCE cycle parity (45) in all
+	// five resident clip programs. Weighted by trip counts that should be worth more
+	// than 2.76%. Measured on the console it is worth nothing: alternated A/B against
+	// the flag-off build on a VU1-bound scene, 84.01/84.61 FPS against 84.46/85.05 -
+	// consistently about half a percent SLOWER, in both pairs. Modelled cycles and
+	// frames have now disagreed in DIRECTION three times on that scene, and only one
+	// change in this whole migration turned modelled cycles into frames
+	// (--split-dead-float-ranges, -16.8% modelled -> +7.7% measured).
+	//
+const unsigned int VU_PAIR_CYCLES_PER_WORD = 4;
+
 	// One point in the space of ready-list heuristics. The default values are the
 	// only behaviour openvcl had before --pair-best-of-many; the alternatives exist
 	// so that several complete schedules can be tried per segment and the shortest
@@ -149,6 +306,7 @@ namespace
 			priorityWeight = 20;
 			longLatencyProducerBonus = 500;
 			partnerPrefersWorst = false;
+			stallAwarePairing = false;
 		}
 
 		bool preferUnblockingWhenUnpaired;
@@ -157,6 +315,10 @@ namespace
 		// Fill the row with the least valuable legal partner rather than the best one,
 		// leaving the valuable one to be a primary on a row of its own.
 		bool partnerPrefersWorst;
+		// Judge a partner by the cycles it costs the row rather than by the nop words
+		// it saves - see pairingHazardDelay. Only --pair-best-of-cycles sets it, and
+		// only as an EXTRA arm to compare against, never as the sole behaviour.
+		bool stallAwarePairing;
 	};
 
 	int readyCandidateScore( unsigned int candidate,
@@ -254,7 +416,8 @@ namespace
 		const bool primaryWritesMac = tokenWritesMacForPair( *block.tokens[primary],
 		                                                     ignoredImplicitWawResources );
 		const int primaryDelay =
-		    pairingHazardDelay( latencyTracker, *block.tokens[primary], NULL, static_cast<int>( currentCycle ) );
+		    pairingHazardDelay( latencyTracker, *block.tokens[primary], NULL,
+		                        static_cast<int>( currentCycle ), strategy.stallAwarePairing );
 
 		for( unsigned int i = 0; i < block.tokens.size(); ++i )
 		{
@@ -272,7 +435,8 @@ namespace
 			if( pairingHazardDelay( latencyTracker,
 			                        *block.tokens[primary],
 			                        block.tokens[i],
-			                        static_cast<int>( currentCycle ) ) > primaryDelay )
+			                        static_cast<int>( currentCycle ),
+			                        strategy.stallAwarePairing ) > primaryDelay )
 				continue;
 
 			const int score = readyCandidateScore( i,
@@ -458,12 +622,26 @@ namespace
 	// to it is different: it asks whether an earlier producer is still in flight,
 	// and that is exactly what the FMAC interlock stalls for. Under
 	// --fmac-interlock, refusing to pair over it only costs instruction words.
+	// Two different questions, and which one the partner filter should ask is the
+	// whole of --pair-best-of-cycles.
+	//
+	//   stallAware = false (what openvcl has always asked): how many nop WORDS
+	//     would this pairing cost me? Under --fmac-interlock that is 0 for every
+	//     VF operand still in flight, because the hardware stalls by itself.
+	//   stallAware = true: how many CYCLES would it cost? A lower-pipe token whose
+	//     producer is four rows back holds the WHOLE row when it is paired, so a
+	//     primary that was ready this cycle waits with it. Declining costs one
+	//     word and never a cycle.
+	//
+	// The first answer is why openvcl pairs a store onto the row right after the
+	// ftoi that feeds it; SCE drains its stores four rows later and pays nothing.
 	int pairingHazardDelay( const VuLatencyTracker& latencyTracker,
 	                        const Token& token,
 	                        const Token* partner,
-	                        int currentCycle )
+	                        int currentCycle,
+	                        bool stallAware )
 	{
-		return vuFmacInterlockEnabled()
+		return ( vuFmacInterlockEnabled() && !stallAware )
 		           ? latencyTracker.manualReadHazardDelay( token, partner, currentCycle )
 		           : latencyTracker.readHazardDelay( token, partner, currentCycle );
 	}
@@ -1032,10 +1210,14 @@ namespace
 		{
 			lastMacReader = -1;
 			lastClipReader = -1;
+			lastStatusReader = -1;
+			declaredLiveResources = VU_RESOURCE_NONE;
 		}
 
 		int lastMacReader;
 		int lastClipReader;
+		int lastStatusReader;
+		unsigned int declaredLiveResources;
 	};
 
 	bool tokenReadsMac( const Token& token )
@@ -1048,16 +1230,30 @@ namespace
 		return token.operand() && isVuClipReader( token.operand()->name() );
 	}
 
+	bool tokenReadsStatus( const Token& token )
+	{
+		return token.operand() && isVuStatusReader( token.operand()->name() );
+	}
+
 	unsigned int ignoredFlagWawMaskForIndex( unsigned int index,
 	                                         int lastMacReader,
-	                                         int lastClipReader )
+	                                         int lastClipReader,
+	                                         int lastStatusReader,
+	                                         unsigned int declaredLiveResources )
 	{
 		unsigned int mask = VU_RESOURCE_NONE;
 		if( lastMacReader < 0 || index > static_cast<unsigned int>( lastMacReader ) )
 			mask |= VU_RESOURCE_MAC;
 		if( lastClipReader < 0 || index > static_cast<unsigned int>( lastClipReader ) )
 			mask |= VU_RESOURCE_CLIP;
-		return mask;
+		if( lastStatusReader < 0 || index > static_cast<unsigned int>( lastStatusReader ) )
+			mask |= VU_RESOURCE_STATUS;
+		// A resource the program DECLARES as its contract with whatever runs next is
+		// never dead, whatever the readers say. The dead-write pass has honoured
+		// out_hw_clip since it was written; this is the half that did not, which is
+		// how a `clipw` the dead-write pass correctly kept could still be permuted
+		// out of the window position its successor reads it in.
+		return mask & ~declaredLiveResources;
 	}
 
 	VuFlagLiveness analyzeFlagLiveness( const std::list<Token>& tokens )
@@ -1070,6 +1266,9 @@ namespace
 				liveness.lastMacReader = static_cast<int>( index );
 			if( tokenReadsClip( *i ) )
 				liveness.lastClipReader = static_cast<int>( index );
+			if( tokenReadsStatus( *i ) )
+				liveness.lastStatusReader = static_cast<int>( index );
+			liveness.declaredLiveResources |= vuDeclaredHardwareResource( *i );
 		}
 		return liveness;
 	}
@@ -1160,12 +1359,39 @@ namespace
 	                                       unsigned int& currentCycle )
 	{
 		const std::vector<VuReadySegmentStrategy>& strategies = readySegmentStrategies();
+		// --pair-best-of-cycles mirrors every entry of the table with its partner
+		// filter asking the cycle question instead of the word one. The arms are
+		// EXTRA, never a replacement: the word winner below is still whatever the
+		// shipped table produced, so the flag can only ever trade a word it is
+		// allowed to spend for a cycle it measures.
+		std::vector<VuReadySegmentStrategy> mirrored;
+		if( vuPairBestOfCyclesEnabled() )
+		{
+			for( unsigned int i = 0; i < strategies.size(); ++i )
+			{
+				VuReadySegmentStrategy stallAware = strategies[i];
+				stallAware.stallAwarePairing = true;
+				mirrored.push_back( stallAware );
+			}
+		}
+		const unsigned int trialCount =
+			static_cast<unsigned int>( strategies.size() + mirrored.size() );
+
 		unsigned int bestIndex = 0;
 		unsigned int bestWords = 0;
 		unsigned int plainWords = 0;
+		// The cycle winner is tracked separately: only a schedule that is no LONGER
+		// than the word winner may take the segment on cycles, so the emitted size
+		// is bounded by what ships today whatever the cycle model says.
+		unsigned int cycleIndex = 0;
+		unsigned int cycleCycles = 0;
+		unsigned int cycleWords = 0;
+		unsigned int bestIndexCycles = 0;
 
-		for( unsigned int i = 0; i < strategies.size(); ++i )
+		for( unsigned int i = 0; i < trialCount; ++i )
 		{
+			const VuReadySegmentStrategy& strategy =
+				i < strategies.size() ? strategies[i] : mirrored[i - strategies.size()];
 			VuLatencyTracker trialTracker = latencyTracker;
 			unsigned int trialCycle = currentCycle;
 			const std::vector<VuScheduledIssueSlot> trial =
@@ -1174,14 +1400,36 @@ namespace
 				                                trialTracker,
 				                                blockStartCycle,
 				                                trialCycle,
-				                                strategies[i] );
+				                                strategy );
 			const unsigned int words = issueSlotEmittedWordCount( trial );
+			const unsigned int cycles = trialCycle - currentCycle;
 			if( i == 0 )
 				plainWords = words;
-			if( i == 0 || words < bestWords )
+			// The word winner is decided over the SHIPPED table only, so with the
+			// flag on the fallback is bit-for-bit the schedule chosen without it.
+			if( i < strategies.size() && ( i == 0 || words < bestWords ) )
 			{
 				bestWords = words;
 				bestIndex = i;
+				bestIndexCycles = cycles;
+			}
+			if( i == 0 || cycles < cycleCycles
+			    || ( cycles == cycleCycles && words < cycleWords ) )
+			{
+				cycleCycles = cycles;
+				cycleWords = words;
+				cycleIndex = i;
+			}
+		}
+
+		if( vuPairBestOfCyclesEnabled() && cycleCycles < bestIndexCycles )
+		{
+			const unsigned int saved = bestIndexCycles - cycleCycles;
+			const unsigned int extra = cycleWords > bestWords ? cycleWords - bestWords : 0;
+			if( saved >= extra * VU_PAIR_CYCLES_PER_WORD )
+			{
+				bestIndex = cycleIndex;
+				bestWords = cycleWords;
 			}
 		}
 
@@ -1194,13 +1442,16 @@ namespace
 			          << " plain=" << plainWords
 			          << " saved=" << ( plainWords - bestWords ) << std::endl;
 
+		const VuReadySegmentStrategy& winner =
+			bestIndex < strategies.size() ? strategies[bestIndex]
+			                             : mirrored[bestIndex - strategies.size()];
 		std::vector<VuScheduledIssueSlot> segmentSlots =
 			scheduleReadySegmentIssueSlots( segment,
 			                                ignoredImplicitWawResources,
 			                                latencyTracker,
 			                                blockStartCycle,
 			                                currentCycle,
-			                                strategies[bestIndex] );
+			                                winner );
 		slots.insert( slots.end(), segmentSlots.begin(), segmentSlots.end() );
 	}
 
@@ -1316,7 +1567,9 @@ namespace
 
 			segmentMask = ignoredFlagWawMaskForIndex( segmentLastIndex,
 			                                          liveness.lastMacReader,
-			                                          liveness.lastClipReader );
+			                                          liveness.lastClipReader,
+			                                          liveness.lastStatusReader,
+			                                          liveness.declaredLiveResources );
 			appendReadyScheduledSegmentSlots( segment,
 			                                 slots,
 			                                 segmentMask,
@@ -1360,7 +1613,9 @@ namespace
 
 		segmentMask = ignoredFlagWawMaskForIndex( segmentLastIndex,
 		                                          liveness.lastMacReader,
-		                                          liveness.lastClipReader );
+		                                          liveness.lastClipReader,
+		                                          liveness.lastStatusReader,
+		                                          liveness.declaredLiveResources );
 		appendReadyScheduledSegmentSlots( segment,
 		                                 slots,
 		                                 segmentMask,
@@ -6244,7 +6499,13 @@ std::vector<VuDependencyEdge> buildVuDependencyGraph( const VuBasicBlock& block,
 		{
 			const VuTokenResourceAccess& a = accesses[before];
 			const VuTokenResourceAccess& b = accesses[after];
-			const unsigned int preciseImplicitResources = VU_RESOURCE_ACC | VU_RESOURCE_MAC | VU_RESOURCE_CLIP;
+			// STATUS is here for the same reason ACC/MAC/CLIP are, and more urgently:
+			// left in the pairwise set its WAW test would fire between every pair of
+			// FMACs in the block. addAccumulatingImplicitFlagDependencies models it.
+			// The WAR test below is deliberately NOT masked - it is what keeps a flag
+			// reader in front of the writers that follow it, for every resource.
+			const unsigned int preciseImplicitResources =
+				VU_RESOURCE_ACC | VU_RESOURCE_MAC | VU_RESOURCE_CLIP | VU_RESOURCE_STATUS;
 			const unsigned int pairwiseImplicitResources = ~preciseImplicitResources;
 
 			if( intersects( a.registerWrites, b.registerReads ) )
@@ -6282,6 +6543,10 @@ std::vector<VuDependencyEdge> buildVuDependencyGraph( const VuBasicBlock& block,
 	                                    accesses,
 	                                    VU_RESOURCE_CLIP,
 	                                    ignoredImplicitWawResources );
+	addAccumulatingImplicitFlagDependencies( edges,
+	                                         accesses,
+	                                         block.tokens,
+	                                         VU_RESOURCE_STATUS );
 
 	return edges;
 }
@@ -6508,10 +6773,14 @@ unsigned int vuIgnoredFlagWawResourcesForRemaining( std::list<Token>::const_iter
 {
 	bool readsMac = false;
 	bool readsClip = false;
+	bool readsStatus = false;
+	unsigned int declared = VU_RESOURCE_NONE;
 	for( std::list<Token>::const_iterator i = begin; i != end; ++i )
 	{
 		readsMac = readsMac || tokenReadsMac( *i );
 		readsClip = readsClip || tokenReadsClip( *i );
+		readsStatus = readsStatus || tokenReadsStatus( *i );
+		declared |= vuDeclaredHardwareResource( *i );
 	}
 
 	unsigned int mask = VU_RESOURCE_NONE;
@@ -6519,7 +6788,13 @@ unsigned int vuIgnoredFlagWawResourcesForRemaining( std::list<Token>::const_iter
 		mask |= VU_RESOURCE_MAC;
 	if( !readsClip )
 		mask |= VU_RESOURCE_CLIP;
-	return mask;
+	if( !readsStatus )
+		mask |= VU_RESOURCE_STATUS;
+	// An out_hw_*/in_hw_* declaration keeps its resource live past every reader, and
+	// past the end of the program - that is what the declaration is for. The
+	// dead-write pass has always honoured it and this did not, so the two disagreed
+	// about whether CLIP was dead in exactly the programs that say it is not.
+	return mask & ~declared;
 }
 
 std::vector<VuLoopCandidate> findVuLoopCandidates( const std::list<Token>& tokens )

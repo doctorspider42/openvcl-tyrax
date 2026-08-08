@@ -11,8 +11,8 @@ standard VSM/DSM-style output that can be assembled by the PS2 toolchain.
 editor. It adds twenty-one options to upstream, all of them off by default, and
 one unconditional correctness fix. With all twenty-one on, the fork assembles
 TyraX's entire VU corpus in less micro memory than Sony's `vcl` needs for the
-same programs — and runs it about 26% slower, measured on a geometry-heavy scene.
-Both halves are in *What it buys* and *Known limits*; the second one is open.
+same programs, and at frame-rate parity with it on two independent
+geometry-heavy scenes.
 
 Upstream has not seen or accepted these changes. Report problems here, not to
 ps2dev. Licence is unchanged: **Academic Free License v2.0**, see
@@ -39,12 +39,12 @@ reference:
 
 | | Sony `vcl` | this fork | |
 |---|---:|---:|---|
-| engine resident VU1 set | 2028 words | **1978** | ceiling is 2042; upstream did not fit at all |
-| engine corpus, all 25 programs | 3982 words | **3868** | under Sony |
-| generated corpus, 45 programs | 9264 words | **9190** | under Sony too, as of the twentieth flag |
+| engine resident VU1 set | 2028 words | **1992** | ceiling is 2042; upstream did not fit at all |
+| engine corpus, all 25 programs | 3982 words | **3900** | under Sony |
+| generated corpus, 45 programs | 9264 words | **9216** | under Sony too |
 | programs that compile | 45 / 45 | **45 / 45** | upstream at the fork point: 23 |
-| frame rate, VU1-bound scene | 105.34 / 105.43 FPS | **80.68 / 75.08** | 20-29% slower - see *Known limits* |
-| frame rate, a light scene using the same VU1 clipper | 52.52 / 52.56 | **52.43 / 52.43** | **parity** |
+| frame rate, VU1-bound terrain scene | 100.4 FPS | **99.5** | **parity** |
+| frame rate, model-heavy scene | 87.84 | **87.38** | **parity** |
 
 The rendered frame is pixel-identical to a Sony-`vcl` build in PCSX2, and the
 GIF packet VU1 stages on a sampled flush is identical across the whole dump bar
