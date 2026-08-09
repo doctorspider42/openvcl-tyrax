@@ -34,7 +34,10 @@ void Dependency::depend( Dependency* dependency )
 		alias()->merge( oldAlias );
 		dependency->propagate( alias() );
 
-		m_state->allocator().releaseAlias( oldAlias );
+		// The alias that survives is the one every dependency was just propagated
+		// to, so the allocator can rewrite the two-address chain onto it instead
+		// of cutting every edge that named the absorbed one.
+		m_state->allocator().releaseAlias( oldAlias, alias() );
 	}
 
 	dependency->m_output[ this ] = this;

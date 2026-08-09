@@ -1609,13 +1609,33 @@ void RegisterAllocator::extendMultiQStageLiveRanges( std::list<Token>& tokens )
 void RegisterAllocator::collectLiteralRegisterUsage( std::list<Token>& tokens )
 {
 	// One synthetic alias per (type, register) pair, with one range per
-	// usage line.  Inserted into m_aliases pre-allocated to its physical
-	// register so the existing conflict check in processAliases naturally
-	// keeps user aliases off it.
+	// usage line PLUS one range per definition-to-use span.  Inserted into
+	// m_aliases pre-allocated to its physical register so the existing conflict
+	// check in processAliases naturally keeps user aliases off it.
+	//
+	// The span is what makes this a live range rather than a set of points, and
+	// it is not decoration.  VI01 is the only legal destination of fcand/fcor/
+	// fceq, so a clip judgement has to be read back out of VI01, and between the
+	// two the register holds a value.  Recorded as two points that range list
+	// merges only while they are ADJACENT - addRange treats a one-line gap as
+	// contiguous - so as long as the flag is read on the next line the two
+	// spellings agree and nothing here changes.  Open one row between them, which
+	// --branch-interlock does by inserting the bubble the hardware needs, and the
+	// point spelling says VI01 is free in the middle: --sink-loads then drops a
+	// load whose value is dead into that row, the allocator has already given it
+	// VI01 because a dead value's range is one line long and does not intersect
+	// either point, and the ibne below tests the load.
+	//
+	// A span is only ever added from a write to a LATER read, so a register that
+	// is only ever read (VI00, and anything the caller passes in) keeps exactly
+	// the ranges it had.  Reads on a path the write does not reach make the span
+	// too long rather than too short, which can cost a register but cannot lose
+	// a value.
 	Alias* floats[32];
 	Alias* integers[16];
+	unsigned int integerWrittenAt[16];
 	for( unsigned int i = 0; i < 32; i++ ) floats[i]   = NULL;
-	for( unsigned int i = 0; i < 16; i++ ) integers[i] = NULL;
+	for( unsigned int i = 0; i < 16; i++ ) { integers[i] = NULL; integerWrittenAt[i] = 0; }
 
 	for( std::list<Token>::iterator it = tokens.begin(); it != tokens.end(); ++it )
 	{
@@ -1631,9 +1651,16 @@ void RegisterAllocator::collectLiteralRegisterUsage( std::list<Token>& tokens )
 
 		const unsigned int line = it->lineNumber();
 
+		// Reads before writes, so `iaddiu VI01, VI01, 2` closes the span it was
+		// standing in before it opens the next one - the same "the read wins"
+		// convention the branch-state analysis uses for aliases.
+		for( int pass = 0; pass < 2; ++pass )
 		for( std::list<Token::Argument>::const_iterator a = it->arguments().begin(); a != it->arguments().end(); ++a )
 		{
 			if( a->content() != Token::Argument::REGISTER )
+				continue;
+			const bool write = (a->flags() & Token::Argument::WRITE) != 0;
+			if( write != (pass == 1) )
 				continue;
 
 			if( a->type() == Token::Argument::FLOAT_REGISTER )
@@ -1661,6 +1688,10 @@ void RegisterAllocator::collectLiteralRegisterUsage( std::list<Token>& tokens )
 					m_aliases[ integers[r] ] = integers[r];
 				}
 				integers[r]->addRange( line, line );
+				if( write )
+					integerWrittenAt[r] = line;
+				else if( integerWrittenAt[r] && integerWrittenAt[r] < line )
+					integers[r]->addRange( integerWrittenAt[r], line );
 			}
 		}
 	}
@@ -3115,16 +3146,70 @@ Alias* RegisterAllocator::obtainAlias( Alias::Type type )
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void RegisterAllocator::releaseAlias( Alias* alias )
+bool RegisterAllocator::trySetSameNamePredecessor( Alias* alias, Alias* predecessor )
+{
+	if( !alias || !predecessor || alias == predecessor )
+		return false;
+	if( alias->type() != predecessor->type() )
+		return false;
+
+	// A chain must stay a chain.  16 hops is well above any plausible depth and
+	// doubles as the defence against a cycle that is already there.
+	Alias* p = predecessor;
+	for( int hop = 0; hop < 16 && p; ++hop, p = p->sameNamePredecessor() )
+	{
+		if( p == alias )
+			return false;
+	}
+
+	alias->setSameNamePredecessor( predecessor );
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void RegisterAllocator::releaseAlias( Alias* alias, Alias* replacement )
 {
 	AliasMap::iterator i = m_aliases.find( alias );
 	assert( i != m_aliases.end() );
 
-	// Any alias whose same-name predecessor chain points at `alias` is
-	// about to hold a dangling pointer; clear those edges so processAliases
-	// doesn't walk into freed memory.  (Without this guard openvcl segfaults
-	// when branch-state merges release one half of a previously-recorded
-	// two-address pair.)
+	// A merge is a RENAME, not a deletion.  Dependency::depend has just rewritten
+	// every dependency that named `alias` to name `replacement`, so the
+	// two-address chain - the edges that make `iaddi k0, k0, -1` write the
+	// register it read - has to be rewritten the same way.  Clearing those edges
+	// instead, which is what this did, is the bug it looks like a fix for: on a
+	// loop whose counter is decremented at a JOIN, the write of the counter is
+	// merged with a later write of the same name, the edge from the live-in dies
+	// with the absorbed alias, and the decrement is allocated to a register the
+	// loop's `ibgtz` at the bottom is the only reader of.  The counter then
+	// recomputes initial-1 every iteration and the trip count is wrong.
+	if( replacement && replacement != alias )
+	{
+		// The survivor inherits the absorbed alias's own predecessor when it has
+		// none: the absorbed alias's place in the chain is now the survivor's.
+		if( !replacement->sameNamePredecessor() )
+			trySetSameNamePredecessor( replacement, alias->sameNamePredecessor() );
+
+		for( AliasMap::iterator k = m_aliases.begin(); k != m_aliases.end(); ++k )
+		{
+			Alias* other = k->first;
+			if( other == alias || other->sameNamePredecessor() != alias )
+				continue;
+
+			// Rename first.  When the merge folds a LATER definition of the same
+			// name onto an earlier one the rename closes a cycle - every member of
+			// it is then the same value and belongs in one register, which a linear
+			// chain says by splicing the dying node out rather than by cutting the
+			// list at it.
+			if( !trySetSameNamePredecessor( other, replacement ) )
+				trySetSameNamePredecessor( other, alias->sameNamePredecessor() );
+		}
+	}
+
+	// Anything still pointing at `alias` is about to hold a dangling pointer;
+	// clear those edges so processAliases doesn't walk into freed memory.
+	// (Without this guard openvcl segfaults when branch-state merges release one
+	// half of a previously-recorded two-address pair.)
 	for( AliasMap::iterator k = m_aliases.begin(); k != m_aliases.end(); ++k )
 	{
 		Alias* other = k->first;

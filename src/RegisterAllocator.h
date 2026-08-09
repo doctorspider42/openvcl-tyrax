@@ -56,7 +56,10 @@ public:
 	// path already did before returning.
 	void reset();
 
-	void releaseAlias( Alias* alias );
+	// `replacement` is the alias `alias` has just been merged INTO, when there is
+	// one.  A merge is a rename, not a deletion, so the two-address chain has to
+	// be rewritten rather than cut - see the body.
+	void releaseAlias( Alias* alias, Alias* replacement = NULL );
 	Alias* obtainAlias( Alias::Type type );
 
 	const Register* floatRegister( unsigned int regNumber ) const;
@@ -98,6 +101,11 @@ private:
 	bool processCommonDirective( Token& token );
 
 	bool processAliases();
+
+	// Install `predecessor` as `alias`'s two-address chain predecessor, unless
+	// that would make the chain a cycle - the same defence BranchState uses when
+	// it builds the edge in the first place.  Returns whether the edge was made.
+	static bool trySetSameNamePredecessor( Alias* alias, Alias* predecessor );
 
 	// Walks all emittable tokens and records, for each physical register,
 	// the line numbers where it appears as a *literal* (non-alias) operand.
