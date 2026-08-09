@@ -72,7 +72,7 @@ something to put behind an opt-in.
 | flag | effect |
 |---|---|
 | `--schedule-flag-readers` | MAC/CLIP flag readers take part in list scheduling instead of ending the segment |
-| `--fmac-interlock` | a VF-to-VF wait costs cycles, not emitted `nop` words — the FMAC pipeline interlocks |
+| `--fmac-interlock` | a VF-to-VF wait costs cycles, not emitted `nop` words — the FMAC pipeline interlocks. A cycle spent this way buys no `Q` or `P` progress: FDIV and EFU have no interlock, so the outstanding results are pushed back by every cycle that became no word |
 | `--sce-latencies` | flag visibility 4 → 1 cycle; an integer load's result readable at issue+3 |
 | `--emit-delay-fillers` | offer the instruction scheduled before a branch as its delay-slot filler |
 | `--branch-interlock` | no padding word before a branch whose operand came from a load or a flag reader |
@@ -240,25 +240,23 @@ allocation runs before scheduling** and its anti-dependences merge the
 independent chains into one. The order of those two passes is the problem, and it
 is open.
 
-**A division BELOW its consumer, reaching it through a back edge, is not
-modelled.** Q and P readiness is now measured against the shortest path into
-each block, which covers a forward branch that jumps over the rows between a
-`div` and its `mulq`. The other direction is not covered: when the consumer
-is ABOVE the producer in the file and the loop's back edge is what connects
-them, the linear tracker has not seen the producer at all when it schedules
-the consumer. Today that comes out right by accident - the tracker sees the
-division from the block above the loop and over-waits, so `waitq` is emitted -
-but nothing makes it do so on purpose, and no reproducer in the corpora here
-puts the two the wrong way round.
-
-**`--loop-liveness-always` does not terminate on at least one program.** A 216-line generated
-stress program with 19 labels and 19 branches, its loops interleaved rather than nested,
-compiles in under a second with no flags and has never been seen to finish with this one - two
-minutes on its own with nothing else on the command line, 66 minutes with the full list, both
-stopped rather than completed. Every other flag prefix is instant on the same
-file. That points at the same `extendLoopDirectiveRange` the note below is about; whether it is
-an infinite loop or a superlinear one is not established. The flag is on in TyraX's list, so a
-project generating that shape would hang its build rather than fail it.
+**A division BELOW its consumer, reaching it through a back edge, is still not
+modelled — and it did NOT come out right by accident.** Q and P readiness is
+measured against the shortest path into each block, which covers a forward
+branch that jumps over the rows between a `div` and its `mulq`. The other
+direction is not covered: when the consumer is ABOVE the producer in the file
+and the loop's back edge is what connects them, the linear tracker has not seen
+the producer at all when it schedules the consumer. This paragraph used to say
+that the tracker over-waits on the division above the loop and so emits `waitq`
+anyway. It does — until you put enough work between that division and the loop
+for `qReadyCycle` to elapse, and then the consumer is issued on the first row of
+the body with nothing protecting it: `test/regress/src/q_backedge_stale.vcl`,
+where the `rsqrt` that feeds it sits two rows below and the gap across the back
+edge is four words of the thirteen cycles RSQRT needs. Both value oracles flag
+it. The suppressed-cycle push (see `--fmac-interlock`) happens to cover that
+reproducer, and "happens to" is the point: nothing here reasons about a back
+edge, so the next shape of it is unguarded. A predecessor-aware Q/P model is the
+real answer and is open.
 
 **The loop-liveness bail-out has no minimal reproducer.** Without
 `--loop-liveness-always`, three of five `as_is_*` programs clobber a register
@@ -269,6 +267,19 @@ make it fire: pool pressure refuses cleanly instead. Every program that does
 trip it has an inner loop, so the extension running twice over nested ranges is
 the untried hypothesis. Worth closing, because a fix nobody can demonstrate in
 ten lines is not one upstream can take.
+
+**Only Q and P are carried across a block boundary; the other latencies are
+not.** Two passes now adjust the outstanding pipelined results — the block-entry
+skew for the shortest path into a block, and the suppressed-cycle push for waits
+that became no instruction word — and both move `qReadyCycle` and `pReadyCycle`
+alone. The integer file, MAC, STATUS and CLIP have the same exposure in
+principle: their producers are recorded against a running cycle count that walks
+the file, and a forward branch does not. It has not been shown that any of them
+can be made to diverge, and a fix without a reproducer is a guess; the shapes to
+try are an integer producer above a forward branch with its consumer at the
+target, and the same for a `clipw`/`fcand` pair. Note this is *latency*, a
+different question from the flag *liveness* across a back edge that
+`--loop-liveness-always` already covers.
 
 ## Upstream and attribution
 

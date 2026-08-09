@@ -724,6 +724,18 @@ const unsigned int VU_PAIR_CYCLES_PER_WORD = 4;
 			paddingSlot.emitCycleCount = emitCycleCount;
 			if( emitCycleCount > 0 )
 			slots.push_back( paddingSlot );
+			// A cycle that becomes no word is a cycle the FMAC interlock is
+			// trusted to supply, and the FDIV pipeline is NOT interlocked: Q and P
+			// arrive a fixed number of cycles after the division issues, and the
+			// only thing that carries a program from one of those cycles to the
+			// next is an instruction word. Letting a suppressed cycle count
+			// against qReadyCycle spends a stall twice - once as the FMAC wait it
+			// was, and again as part of a division's latency - and the Q reader
+			// below then issues with no waitq on a gap the hardware never opened.
+			// Pushing the pipelined results out by the suppressed count measures
+			// that gap in words, which is what the hardware guarantees.
+			latencyTracker.delayPipelinedResultsBy(
+				static_cast<int>( paddingCycleCount ) - static_cast<int>( emitCycleCount ) );
 			currentCycle += paddingCycleCount;
 			issueDelay = latencyTracker.readHazardDelay( token,
 			                                             partner,

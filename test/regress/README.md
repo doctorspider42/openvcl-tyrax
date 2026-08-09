@@ -17,10 +17,10 @@ frame rate that made no sense, twice, months apart.
 
 Exit status is 0 only if every case passes. A failure names the bug, not a diff.
 
-## Why three kinds of assertion
+## Why several kinds of assertion
 
 Each of the four shipped bugs needed a *different* kind of check to be visible at
-all. That is the argument for keeping all three rather than picking one:
+all. That is the argument for keeping all of them rather than picking one:
 
 | kind | what it asserts | which bug needed it |
 |---|---|---|
@@ -30,6 +30,19 @@ all. That is the argument for keeping all three rather than picking one:
 
 `COUNT` looks the crudest and is the one that would have caught the two most
 expensive bugs on the day they landed.
+
+**`TIME` is the odd one out and the reason is worth stating.** Every other kind
+begins by waiting for a `.vsm`, so not one of them can see a compiler that never
+produces one. `--loop-liveness-always` built a ring in the register allocator's
+same-name chain on one control-flow shape and the walk of that chain never
+returned: 66 minutes, then stopped rather than finished. That is worse than a
+compile error — a project build hangs with no diagnosis at all — and it is the
+only failure in this compiler's history that a user would have met head-on. A
+`TIME` case names a bound in seconds and asserts the compile finishes inside it.
+The bound is not a performance budget: `loop_chain_ring` takes 0.55 s and its
+bound is 60, so a slow machine cannot turn it red, and the failure it reports is
+non-termination rather than slowness. Every other case is compiled under a
+generous default bound for the same reason — a suite that hangs reports nothing.
 
 ## Rules that keep this suite honest
 

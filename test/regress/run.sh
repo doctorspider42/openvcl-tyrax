@@ -55,17 +55,45 @@ while IFS=$'\t' read -r name kind arg bug _rest; do
     order+=("$name")
 done < "$HERE/cases.tsv"
 
+# Every compile is bounded, TIME case or not. A compiler that does not terminate
+# is the one failure this suite could not report: without a bound the harness
+# hangs with it and says nothing at all, which is worse than a red line.
+# DEFAULT_TMO is generous - it is there to keep the suite answering, not to
+# measure anything. A TIME case sets its own, and that one IS the assertion.
+DEFAULT_TMO=120
+if ! command -v timeout >/dev/null 2>&1; then
+    echo "timeout(1) not found - a non-terminating compile would hang this suite" >&2
+    exit 2
+fi
+
 fail=0; pass=0; xfail=0; failed=""
+declare -A RC
 for name in "${order[@]}"; do
     [ "${KIND[$name]}" = "XFAIL" ] && continue
     src="$HERE/src/$name.vcl"
     [ -f "$src" ] || { echo "  FAIL  $name - no src/$name.vcl"; fail=$((fail+1)); failed="$failed $name"; continue; }
     cp "$src" "$OUT/src/"
-    if ! "$OPENVCL" "${FLAGS[@]}" "$src" > "$OUT/vsm/$name.vsm" 2>"$OUT/$name.err"; then
-        echo "  FAIL  $name - did not compile (${BUG[$name]})"
-        [ "$VERBOSE" = "--verbose" ] && sed 's/^/          /' "$OUT/$name.err"
+    tmo="$DEFAULT_TMO"
+    [ "${KIND[$name]}" = "TIME" ] && tmo="${ARG[$name]}"
+    timeout "$tmo" "$OPENVCL" "${FLAGS[@]}" "$src" > "$OUT/vsm/$name.vsm" 2>"$OUT/$name.err"
+    RC["$name"]=$?
+    # 124 is GNU coreutils' "still running", 143 the shell's view of the SIGTERM
+    # that killed it, 15 busybox's. Anything else is a compiler that answered.
+    case "${RC[$name]}" in
+        124|143|137|15) touch "$OUT/timeout.$name" ;;
+    esac
+    if [ "${RC[$name]}" -ne 0 ]; then
+        # A TIME case is JUDGED below on this status, so it must not be counted
+        # here as well - the whole point of the kind is that not finishing is the
+        # failure it reports, in its own words.
+        if [ "${KIND[$name]}" != "TIME" ]; then
+            echo "  FAIL  $name - did not compile (${BUG[$name]})"
+            [ "$VERBOSE" = "--verbose" ] && sed 's/^/          /' "$OUT/$name.err"
+            fail=$((fail+1)); failed="$failed $name"
+        fi
+        # Removed either way: half a .vsm from a killed compiler is not an input
+        # the value oracles below should be reading.
         rm -f "$OUT/vsm/$name.vsm"
-        fail=$((fail+1)); failed="$failed $name"
     fi
 done
 
@@ -93,6 +121,27 @@ for name in "${order[@]}"; do
     if [ "$kind" = "XFAIL" ]; then
         printf '  xfail %-30s %s\n' "$name" "${BUG[$name]}"
         xfail=$((xfail+1)); continue
+    fi
+    if [ "$kind" = "TIME" ]; then
+        # The only kind whose assertion is about the COMPILER rather than about
+        # what it emitted: this program must finish. A build that loops forever
+        # on one control-flow shape hangs a project build instead of failing it,
+        # which is the one failure mode a user cannot diagnose. The bound is not
+        # a performance budget - it is orders of magnitude above the real time -
+        # so a machine being slow today cannot turn this red.
+        if [ -f "$OUT/timeout.$name" ]; then
+            printf '  FAIL  %-30s %s - did not finish inside %ss\n' \
+                   "$name" "${BUG[$name]}" "${ARG[$name]}"
+            fail=$((fail+1)); failed="$failed $name"
+        elif [ "${RC[$name]}" != "0" ] || [ ! -s "$OUT/vsm/$name.vsm" ]; then
+            printf '  FAIL  %-30s %s - compile failed (rc %s)\n' \
+                   "$name" "${BUG[$name]}" "${RC[$name]}"
+            [ "$VERBOSE" = "--verbose" ] && sed 's/^/          /' "$OUT/$name.err"
+            fail=$((fail+1)); failed="$failed $name"
+        else
+            printf '  ok    %-30s %s\n' "$name" "$kind"; pass=$((pass+1))
+        fi
+        continue
     fi
     [ -f "$OUT/vsm/$name.vsm" ] || continue   # compile failure already counted
     ok=1; detail=""

@@ -17,6 +17,11 @@
 #             MOST that many. The only kind here that can fail on an emitter
 #             which got MORE conservative; every value oracle is satisfied by
 #             one that waits for everything.
+# kind TIME:  arg is a bound in SECONDS - the compile must FINISH inside it.
+#             The only kind about the compiler rather than its output. A build
+#             that loops forever on one control-flow shape hangs a project
+#             build instead of failing it, and no other kind here can see that
+#             at all: they all begin by waiting for a .vsm.
 # kind XFAIL: known-unjudgeable - recorded so nobody re-derives why, never failed on.
 #
 clip_liveout	COUNT	clipw:3	CLIP shift register	a later clipw shifts the earlier one up an entry, it does not kill it; --drop-dead-writes deleted 4 of 7 per clip program and the "entirely inside" fast path stopped firing
@@ -60,3 +65,8 @@ cond_clipflag_clobber	COND	-	clip judgement clobbered	VI01 is the only legal des
 cond_clipflag_live	COND	-	clip judgement clobbered (control)	the same shape with the loaded value LIVE, which openvcl already allocates elsewhere - if this ever fails the fix has become a blanket ban on touching VI01
 cond_loop_counter	COND	-	loop-carried integer counter	the in-loop decrement was allocated to a different register from its live-in with no copy on the back edge, so the counter recomputed initial-1 every iteration; fires on stock upstream with no flags
 cond_loop_counter_ok	COND	-	loop-carried integer counter (control)	the same loop with the decrement at the same join, which openvcl carries correctly - the fix must not cost a register on every counted loop
+loop_chain_ring	TIME	60	same-name chain became a ring	--loop-liveness-always extends a live range once per BACK EDGE, and two back edges need not nest; each loop picks the first alias of a name in ITS OWN range as the one the readers hold, so loop A ties X to Y and loop B ties Y back to X. processAliases then walked that ring for an ancestor and never stopped - 216 lines of generated VU hung for 66 minutes and was never seen to finish
+loop_chain_ring_carry	COND	-	same-name chain became a ring (control)	the same interleaved loops with the counters decremented, which compiled all along: the carried write must STILL be tied to the alias its readers hold. Refusing the closing edge is the fix; refusing every edge would also terminate, and would put the decrement in a register the test at the top never reads
+q_interlock_words	COND	-	Q latency paid in cycles that became no words	under --fmac-interlock a wait on the FMAC pipeline is kept in the cycle model and emitted as no instruction word, because the hardware stalls by itself - but FDIV has no interlock, and only a word carries the program from one cycle to the next. Three words below an rsqrt the model believed fourteen cycles had passed, chose NOP padding over waitq, and the mulq read the previous quotient
+q_interlock_words_ok	MAXCOUNT	waitq:0	Q latency paid in cycles that became no words (control)	the same rsqrt with eighteen WORDS between it and its reader, which needs no wait at all - a fix that stops trusting the interlock by padding every Q reader puts a waitq here and passes every value oracle in this file
+q_backedge_stale	PATH	-	Q producer BELOW its consumer, across a back edge	the consumer is the first row of the loop and the rsqrt that feeds it is two rows below, so on every iteration after the first the gap is four words where thirteen cycles are needed. The linear tracker has not seen that producer when it schedules the consumer; it was reported as coming out right by accident, because a division ABOVE the loop left qReadyCycle in the future - put enough work between that division and the loop and the accident stops happening. Control: q_interlock_words_ok, which asserts a Q reader far enough below in WORDS still gets no waitq

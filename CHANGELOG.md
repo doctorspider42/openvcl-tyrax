@@ -1,5 +1,37 @@
 ## Unreleased
 
+- `--loop-liveness-always` terminates on every control-flow shape. The live-range
+  extension runs once per BACK EDGE, and two back edges need not nest: each call
+  picks the first alias of a name in ITS OWN range as the one the readers at the
+  top hold, so a loop can tie an alias to one that a neighbouring loop has already
+  tied back to it. The same-name chain became a ring with no root, and the
+  ancestor walk in `processAliases` - the one walk of that chain in the file
+  without a hop cap - never left it. A 216-line generated program with nineteen
+  interleaved loops ran 66 minutes and was never seen to finish; it now compiles
+  in 0.55 s. The closing edge is refused rather than added, which costs nothing:
+  an edge that would close a ring runs between two aliases already on one chain,
+  so they reach one root and share one register either way. The cycle test is now
+  Floyd rather than a fixed depth of 16, because a fixed depth answers "no cycle"
+  for any ring that closes further up and the walks it guards then never end.
+  A compile that hangs is worse than one that fails: it stops a project build with
+  no diagnosis at all. `test/regress` has a new assertion kind, `TIME`, for it.
+- A cycle that becomes no instruction word no longer counts toward `Q` or `P`
+  readiness. Under `--fmac-interlock` a wait on the FMAC pipeline is kept in the
+  cycle model and emitted as nothing, because the hardware stalls by itself - but
+  the FDIV and EFU pipelines have no interlock, and their results arrive a fixed
+  number of cycles after issue with only instruction words carrying the program
+  from one cycle to the next. Spending a suppressed stall twice - once as the FMAC
+  wait it was, again as part of a division's latency - made a `mulq` three words
+  below an `rsqrt` look fourteen cycles below it. The padding was then chosen as
+  `nop` rather than `waitq`, and the read returned the previous quotient. The
+  outstanding FDIV/EFU results are now pushed back by every cycle that produced no
+  word, in both the scheduler's model and the emitter's.
+  This also covers the loop-carried direction, which the known-limits list claimed
+  came out right by accident and does not: with enough work between a division
+  above a loop and the loop itself, `qReadyCycle` elapses and the consumer at the
+  top of the body is issued unprotected against a producer two rows below it -
+  `test/regress/src/q_backedge_stale.vcl`. Covering it here is still an accident;
+  nothing reasons about a back edge, and that remains open.
 - Q and P readiness is now measured against the SHORTEST path into a block, not
   the fall-through one. Blocks are scheduled in file order with one latency
   tracker carried along it, so a `div` above a forward branch and a `mulq` at

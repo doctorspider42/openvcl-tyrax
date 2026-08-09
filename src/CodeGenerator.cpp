@@ -2592,6 +2592,12 @@ void CodeGenerator::emitStrictScheduledPadding( const VuScheduledIssueSlot& slot
 			const unsigned int words = slot.emitCycleCount < cycles ? slot.emitCycleCount : cycles;
 			for( unsigned int i = 0; i < words; ++i )
 				addNopLine();
+			// The cycles that became no words belong to the FMAC interlock and to
+			// nothing else. Q and P are not interlocked, so a division's latency
+			// cannot be paid out of them - see the same call in
+			// appendReadHazardPaddingSlots.
+			m_latencyTracker.delayPipelinedResultsBy(
+				static_cast<int>( cycles ) - static_cast<int>( words ) );
 			m_currentCycle += cycles;
 			break;
 		}

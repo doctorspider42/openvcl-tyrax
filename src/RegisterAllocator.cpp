@@ -885,8 +885,17 @@ bool RegisterAllocator::processAliases()
 				if( src == dest ) continue;
 				// Same-name predecessor on the chain doesn't count as a
 				// conflict: that's the whole point of coalescing.
+				// Bounded by the alias count, which no acyclic chain can reach, so
+				// this walk gives the same answer as an unbounded one on every
+				// input that is well formed and merely stops on one that is not.
+				// It is the loop that hung on --loop-liveness-always: every other
+				// walk of this chain in the file already carries a cap and this one
+				// did not, so a ring built by the pass above spun here forever.
 				bool isAncestor = false;
-				for( Alias* p = dest->sameNamePredecessor(); p; p = p->sameNamePredecessor() )
+				const size_t ancestorCap = m_aliases.size() + 1;
+				size_t ancestorHops = 0;
+				for( Alias* p = dest->sameNamePredecessor(); p && ancestorHops < ancestorCap;
+				     p = p->sameNamePredecessor(), ++ancestorHops )
 				{
 					if( p == src ) { isAncestor = true; break; }
 				}
@@ -1274,7 +1283,17 @@ void RegisterAllocator::tieCarriedWritesToLiveInAliases( std::list<Token>& token
 			// name cannot claim it too without contradicting the earlier link.
 			if( written->sameNamePredecessor() )
 				continue;
-			written->setSameNamePredecessor( carried->second );
+			// Through trySetSameNamePredecessor, not the raw setter, because this
+			// runs ONCE PER BACK EDGE and the ranges of two back edges need not
+			// nest. Two overlapping loops disagree about which alias of a name is
+			// the one its readers hold - each picks the first in ITS OWN range -
+			// so loop A can tie X to Y and loop B tie Y back to X. The chain is
+			// then a ring with no root, and processAliases walks it forever.
+			// Refusing the closing edge costs nothing: an edge that closes a ring
+			// runs between two aliases that are ALREADY on one chain, which is the
+			// whole of what tying them was for - they reach one root and the
+			// pre-pass hands the ring one register either way.
+			trySetSameNamePredecessor( written, carried->second );
 		}
 	}
 }
@@ -3153,12 +3172,24 @@ bool RegisterAllocator::trySetSameNamePredecessor( Alias* alias, Alias* predeces
 	if( alias->type() != predecessor->type() )
 		return false;
 
-	// A chain must stay a chain.  16 hops is well above any plausible depth and
-	// doubles as the defence against a cycle that is already there.
-	Alias* p = predecessor;
-	for( int hop = 0; hop < 16 && p; ++hop, p = p->sameNamePredecessor() )
+	// A chain must stay a chain, and the check has to be COMPLETE rather than
+	// deep-enough-looking: a fixed depth of 16 answers "no cycle" for any ring
+	// that would close further up than that, and the walks it protects then never
+	// terminate. Floyd rather than a depth, because this is a static member with
+	// no alias count to bound itself by - and it needs no bound: the hare meets
+	// the tortoise on a ring, so the walk ends whether or not the chain it is
+	// handed is already one. A chain that IS already a ring gets nothing added to
+	// it either.
+	Alias* slow = predecessor;
+	Alias* fast = predecessor;
+	while( slow )
 	{
-		if( p == alias )
+		if( slow == alias )
+			return false;
+		slow = slow->sameNamePredecessor();
+		fast = fast ? fast->sameNamePredecessor() : NULL;
+		fast = fast ? fast->sameNamePredecessor() : NULL;
+		if( fast && fast == slow )
 			return false;
 	}
 
