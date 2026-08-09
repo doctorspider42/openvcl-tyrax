@@ -102,6 +102,16 @@ for name in "${order[@]}"; do
         got=$(grep -c -i -E "(^|[[:space:]])$mnem" "$OUT/vsm/$name.vsm" || true)
         [ "$got" -ge "$want" ] || { ok=0; detail="emitted $got x $mnem, source needs $want"; }
         ;;
+    # The other direction, and the only kind here that can fail on a compiler
+    # which has become MORE conservative.  Every value oracle in this suite is
+    # satisfied by an emitter that waits for everything, so a fix that pads
+    # blind passes all of them - which is how a correctness case ends up with a
+    # control that asserts nothing.
+    MAXCOUNT)
+        mnem="${ARG[$name]%%:*}"; want="${ARG[$name]##*:}"
+        got=$(grep -c -i -E "(^|[[:space:]])$mnem" "$OUT/vsm/$name.vsm" || true)
+        [ "$got" -le "$want" ] || { ok=0; detail="emitted $got x $mnem, at most $want is legal here"; }
+        ;;
     ORDER) flagged "$ORDER_OUT" "$name" && { ok=0; detail="flag-order violation"; } ;;
     VALUE) flagged "$VALUE_OUT" "$name" && { ok=0; detail="stored value diverges from the source"; } ;;
     PATH)  flagged "$PATH_OUT"  "$name" && { ok=0; detail="stored value diverges along some path"; } ;;

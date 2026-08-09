@@ -41,6 +41,24 @@ public:
 	int qReadyCycle() const;
 	int pReadyCycle() const;
 
+	// EVERY CYCLE IN THIS TRACKER IS MEASURED ON THE FALL-THROUGH TIMELINE.
+	// A block reached by a forward branch is entered EARLIER than that timeline
+	// says - the branch and its delay slot are the only rows between them,
+	// while the timeline counted every row the branch jumped over. An
+	// outstanding division is therefore less complete than qReadyCycle()
+	// claims, by exactly that difference, and there is no hardware interlock on
+	// Q or P to cover the gap: a `mulq` that issues early reads the PREVIOUS
+	// quotient and says nothing.
+	//
+	// Only Q and P are pushed. The FMAC pipeline interlocks on VF registers and
+	// --branch-interlock covers the integer results a branch reads, so those
+	// waits are the hardware's to take on whichever path it arrives by. The
+	// flags are neither, and are left alone here deliberately: the CLIP window
+	// is positional and its cross-edge liveness is handled in the scheduler,
+	// so moving it here would be a second, untested answer to the same
+	// question.
+	void delayPipelinedResultsBy( int cycles );
+
 private:
 	int readHazardDelayImpl( const Token& token,
 	                         const Token* partner,

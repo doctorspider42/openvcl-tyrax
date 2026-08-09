@@ -281,6 +281,22 @@ void VuLatencyTracker::recordWrites( const Token& token, int issueCycle, bool fo
 		m_pReadyCycle = readyCycle;
 }
 
+void VuLatencyTracker::delayPipelinedResultsBy( int cycles )
+{
+	if( cycles <= 0 )
+		return;
+	// reset() parks both at -10 to mean "nothing is in flight", and pushing THAT
+	// forward would invent a producer out of nothing: after a 60-cycle shift a
+	// -10 becomes 50, and every Q reader below would wait for a division that
+	// was never issued. A recorded readyCycle is issueCycle + latency + 1 with
+	// issueCycle >= 0 and latency >= 2, so it is never negative, and the sign is
+	// a sound test for "was anything recorded".
+	if( m_qReadyCycle >= 0 )
+		m_qReadyCycle += cycles;
+	if( m_pReadyCycle >= 0 )
+		m_pReadyCycle += cycles;
+}
+
 int VuLatencyTracker::qReadyCycle() const
 {
 	return m_qReadyCycle;

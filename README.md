@@ -240,6 +240,26 @@ allocation runs before scheduling** and its anti-dependences merge the
 independent chains into one. The order of those two passes is the problem, and it
 is open.
 
+**A division BELOW its consumer, reaching it through a back edge, is not
+modelled.** Q and P readiness is now measured against the shortest path into
+each block, which covers a forward branch that jumps over the rows between a
+`div` and its `mulq`. The other direction is not covered: when the consumer
+is ABOVE the producer in the file and the loop's back edge is what connects
+them, the linear tracker has not seen the producer at all when it schedules
+the consumer. Today that comes out right by accident - the tracker sees the
+division from the block above the loop and over-waits, so `waitq` is emitted -
+but nothing makes it do so on purpose, and no reproducer in the corpora here
+puts the two the wrong way round.
+
+**`--loop-liveness-always` does not terminate on at least one program.** A 216-line generated
+stress program with 19 labels and 19 branches, its loops interleaved rather than nested,
+compiles in under a second with no flags and has never been seen to finish with this one - two
+minutes on its own with nothing else on the command line, 66 minutes with the full list, both
+stopped rather than completed. Every other flag prefix is instant on the same
+file. That points at the same `extendLoopDirectiveRange` the note below is about; whether it is
+an infinite loop or a superlinear one is not established. The flag is on in TyraX's list, so a
+project generating that shape would hang its build rather than fail it.
+
 **The loop-liveness bail-out has no minimal reproducer.** Without
 `--loop-liveness-always`, three of five `as_is_*` programs clobber a register
 carried across a loop's back edge. The guard responsible is visible in

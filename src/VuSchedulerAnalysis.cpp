@@ -6749,6 +6749,111 @@ std::vector<VuScheduledIssueSlot> scheduleVuBasicBlockReadyIssueSlots( const VuB
 
 namespace
 {
+	bool vuBranchTargetLabelOf( const Token& branch, std::string& label )
+	{
+		for( std::list<Token::Argument>::const_iterator i = branch.arguments().begin();
+		     i != branch.arguments().end(); ++i )
+		{
+			if( !(i->flags() & Token::Argument::BRANCH) )
+				continue;
+			if( i->type() != Token::Argument::IMMEDIATE )
+				return false;
+			label = i->immediate();
+			return true;
+		}
+		return false;
+	}
+
+	// HOW MUCH EARLIER THAN THE FALL-THROUGH TIMELINE A BLOCK CAN BE ENTERED.
+	//
+	// Blocks are laid out and clocked in FILE ORDER, and the latency tracker is
+	// carried from one to the next along that order. That is exactly right for a
+	// block reached by falling through, and wrong for one reached by a branch:
+	// the branch and its delay slot are the only two rows between the branch and
+	// the target, while the linear clock counted every row in between. A `div`
+	// above the branch and its `mulq` at the target look far apart in the file
+	// and are six cycles apart on the wire.
+	//
+	//   skew(B) = (B's linear entry cycle) - (shortest path in cycles to B)
+	//
+	// and it is built edge by edge. Along a fall-through edge the skew is
+	// inherited unchanged. Along a branch from a block whose own skew is s, with
+	// the branch issuing at absolute cycle X and the target's linear entry at L,
+	// the shortest path to L through that edge is (X - s) + 2, so the edge's
+	// skew is s + L - X - 2. The block takes the LARGEST of its edges, because
+	// the largest skew is the shortest real path.
+	//
+	// A BACKWARD edge can never win that maximum and is not recorded: it has
+	// X > L, and the loop body between L and X is on every path through it, so
+	// s + L - X - 2 is below the skew the loop head already carries. What a back
+	// edge CAN do is make a producer BELOW a consumer feed it on the next
+	// iteration, and that is a different question this does not answer - see
+	// the note in the fork's CHANGELOG.
+	class VuEntrySkew
+	{
+	public:
+		VuEntrySkew() : m_applied( 0 ) {}
+
+		// The cycles by which the outstanding Q/P results must be pushed back
+		// before this block is scheduled. Monotone: the skew only ever grows, so
+		// a block that inherits a larger skew than its own edges justify is
+		// over-, never under-, estimated.
+		int enter( const VuBasicBlock& block, unsigned int linearEntryCycle )
+		{
+			int skew = m_applied;
+			if( !block.tokens.empty() && block.tokens[0]->label().length() != 0 )
+			{
+				std::map<std::string, int>::const_iterator i =
+				    m_edgeBase.find( block.tokens[0]->label() );
+				if( i != m_edgeBase.end() )
+				{
+					const int viaBranch = i->second + static_cast<int>( linearEntryCycle );
+					if( viaBranch > skew )
+						skew = viaBranch;
+				}
+			}
+			const int delta = skew - m_applied;
+			m_applied = skew;
+			return delta > 0 ? delta : 0;
+		}
+
+		// L is not known when the branch is scheduled, so what is stored is the
+		// part of the edge's skew that does not depend on it.
+		void recordBranch( const Token& branch, int absoluteIssueCycle )
+		{
+			std::string label;
+			if( !vuBranchTargetLabelOf( branch, label ) )
+				return;
+			const int base = m_applied - absoluteIssueCycle - 2;
+			std::map<std::string, int>::iterator i = m_edgeBase.find( label );
+			if( i == m_edgeBase.end() || base > i->second )
+				m_edgeBase[label] = base;
+		}
+
+		void recordBlockBranches( const std::vector<VuScheduledIssueSlot>& slots,
+		                          unsigned int blockStartCycle )
+		{
+			for( std::vector<VuScheduledIssueSlot>::const_iterator s = slots.begin();
+			     s != slots.end(); ++s )
+			{
+				const Token* pair[2] = { s->firstToken, s->secondToken };
+				for( int k = 0; k < 2; ++k )
+				{
+					if( !pair[k] )
+						continue;
+					if( !vuTokenHasInstructionFlag( *pair[k], VU_INSTR_BRANCH ) )
+						continue;
+					recordBranch( *pair[k],
+					              static_cast<int>( blockStartCycle + s->issueCycle ) );
+				}
+			}
+		}
+
+	private:
+		int m_applied;
+		std::map<std::string, int> m_edgeBase;
+	};
+
 	VuScheduledProgram scheduleVuProgramReadyIssueSlotsInternal( const std::list<Token>& tokens,
 	                                                             unsigned int ignoredImplicitWawResources,
 	                                                             bool carryLatencyAcrossBlocks )
@@ -6756,14 +6861,17 @@ namespace
 		VuScheduledProgram program;
 		const std::vector<VuBasicBlock> blocks = buildVuBasicBlocks( tokens );
 		VuLatencyTracker programLatencyTracker;
+		VuEntrySkew skew;
 
 		for( std::vector<VuBasicBlock>::const_iterator block = blocks.begin(); block != blocks.end(); ++block )
 		{
 			VuScheduledBasicBlock scheduledBlock;
 			scheduledBlock.block = *block;
 			scheduledBlock.firstIssueCycle = program.cycleCount;
+			const int pushBack = skew.enter( *block, program.cycleCount );
 			if( carryLatencyAcrossBlocks )
 			{
+				programLatencyTracker.delayPipelinedResultsBy( pushBack );
 				scheduledBlock.issueSlots =
 					scheduleVuBasicBlockReadyIssueSlotsWithLatency( *block,
 					                                                ignoredImplicitWawResources,
@@ -6779,6 +6887,7 @@ namespace
 					                                                blockLatencyTracker,
 					                                                program.cycleCount );
 			}
+			skew.recordBlockBranches( scheduledBlock.issueSlots, program.cycleCount );
 			for( std::vector<VuScheduledIssueSlot>::const_iterator slot = scheduledBlock.issueSlots.begin();
 			     slot != scheduledBlock.issueSlots.end(); ++slot )
 				scheduledBlock.cycleCount += slot->cycleCount;
@@ -6821,14 +6930,17 @@ namespace
 		const std::vector<VuBasicBlock> blocks = buildVuBasicBlocks( tokens );
 		const VuFlagLiveness liveness = analyzeFlagLiveness( tokens );
 		VuLatencyTracker programLatencyTracker;
+		VuEntrySkew skew;
 
 		for( std::vector<VuBasicBlock>::const_iterator block = blocks.begin(); block != blocks.end(); ++block )
 		{
 			VuScheduledBasicBlock scheduledBlock;
 			scheduledBlock.block = *block;
 			scheduledBlock.firstIssueCycle = program.cycleCount;
+			const int pushBack = skew.enter( *block, program.cycleCount );
 			if( carryLatencyAcrossBlocks )
 			{
+				programLatencyTracker.delayPipelinedResultsBy( pushBack );
 				scheduledBlock.issueSlots =
 					scheduleVuBasicBlockReadyIssueSlotsWithFlagLiveness( *block,
 					                                                     liveness,
@@ -6844,6 +6956,7 @@ namespace
 					                                                     blockLatencyTracker,
 					                                                     program.cycleCount );
 			}
+			skew.recordBlockBranches( scheduledBlock.issueSlots, program.cycleCount );
 			for( std::vector<VuScheduledIssueSlot>::const_iterator slot = scheduledBlock.issueSlots.begin();
 			     slot != scheduledBlock.issueSlots.end(); ++slot )
 				scheduledBlock.cycleCount += slot->cycleCount;

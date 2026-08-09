@@ -1,5 +1,20 @@
 ## Unreleased
 
+- Q and P readiness is now measured against the SHORTEST path into a block, not
+  the fall-through one. Blocks are scheduled in file order with one latency
+  tracker carried along it, so a `div` above a forward branch and a `mulq` at
+  the branch's target looked twelve rows apart in the file and were six cycles
+  apart on the wire; `Q` has no hardware interlock, so the `mulq` read the
+  previous quotient. Each block now takes the largest skew over its incoming
+  edges - `s + L - X - 2` for a branch out of a block with skew `s` issuing at
+  `X` into a label whose fall-through entry is `L` - and the outstanding FDIV
+  and EFU results are pushed back by it before the block is scheduled. Backward
+  edges cannot win that maximum, so one pass in file order is exact.
+  Only Q and P move: the FMAC pipeline interlocks on VF registers and
+  `--branch-interlock` covers the integer results a branch reads.
+  Known gap: a producer BELOW its consumer, feeding it through a back edge on
+  the next iteration, is a different question and is not answered here.
+
 0.4.0
 - Renamed root documentation files to Markdown and consolidated the active
   roadmap into `README.md`, removing the standalone TODO file.

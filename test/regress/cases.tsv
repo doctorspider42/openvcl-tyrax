@@ -13,6 +13,10 @@
 # kind COND:  pd-cond asserts the expression a conditional branch TESTS matches
 #             the source. The other kinds compare STORED values, so a value whose
 #             only reader is a branch condition was never compared at all.
+# kind MAXCOUNT: arg is mnemonic:maximum - the emitted output must contain at
+#             MOST that many. The only kind here that can fail on an emitter
+#             which got MORE conservative; every value oracle is satisfied by
+#             one that waits for everything.
 # kind XFAIL: known-unjudgeable - recorded so nobody re-derives why, never failed on.
 #
 clip_liveout	COUNT	clipw:3	CLIP shift register	a later clipw shifts the earlier one up an entry, it does not kill it; --drop-dead-writes deleted 4 of 7 per clip program and the "entirely inside" fast path stopped firing
@@ -38,6 +42,8 @@ clip_loop_window	PATH	-	CLIP liveness across a back edge	"last CLIP reader" was 
 clip_loop_window_ok	PATH	-	CLIP liveness across a back edge (control)	the same loop with the reader AFTER both writers, which was already correct - if this ever fails the back-edge extension has started ordering clipw that nothing reads
 predec_addressing	COND	-	pre-decrement emitted as post-increment	the parser tagged a PREDEC argument with the POSTINC flag, so Argument::PREDEC was never set on anything, the emitter's `--` branch was dead and every lqd/sqd came out as `(VIxx++)` - which dvp-as rejects, so no source using pre-decrement addressing could be built at all
 postinc_addressing	COND	-	pre-decrement emitted as post-increment (control)	the post-increment half of the same operand path, which was always right - the fix must not swap the two flags over
+q_branch_gap	PATH	-	Q latency measured down the file	blocks are clocked in file order and the latency tracker is carried along it, so the distance from a div to a mulq at a LABEL was counted down the file - twelve rows - while the taken edge of the branch above it leaves six cycles; Q has no hardware interlock and the mulq read the previous quotient
+q_branch_gap_ok	MAXCOUNT	waitq:0	Q latency measured down the file (control)	the same labelled Q reader entered by a forward branch with no edge that shortens the distance - a fix that pads at every branch target instead of measuring the shortest path puts a waitq here and passes every value oracle in this file
 # --- known-unjudgeable, recorded rather than asserted ---
 mac_latency	XFAIL	-	no MAC oracle	neither assembler preserves MAC-flag provenance: SCE inserts filler FMACs above an fmand and deletes dead ones, so there is no valid cross-assembler comparison. Zero MAC readers exist in the engine corpus
 efu_pair	XFAIL	-	EFU completion timing	Sony places NOP rows so an mfp lands between two eleng completions; judging that needs a cycle model, and guessing at one is the mistake this effort has already made twice
