@@ -1293,6 +1293,80 @@ const unsigned int VU_PAIR_CYCLES_PER_WORD = 4;
 		return mask & ~declaredLiveResources;
 	}
 
+	// A writer past the last reader is dead ONLY IF CONTROL NEVER COMES BACK.
+	//
+	// "Last reader" is a position in the token list, and the token list is
+	// linear while the program is not. A `clipw` in a loop's last block sits at
+	// a higher index than the `fceq` at the loop's head, so it read as dead -
+	// and CLIP is a SHIFT REGISTER, so dropping its writer chain let the
+	// scheduler exchange two `clipw` and hand the next iteration's `fceq` a
+	// window with two entries transposed. The dead-write pass never removed
+	// them; nothing was missing from the output except the order, which is why
+	// four rounds of value oracles walked past it and only a branch-condition
+	// comparison caught it.
+	//
+	// So each back edge extends its resources' liveness to the end of its own
+	// loop: a reader anywhere inside [target, branch] keeps every writer in
+	// that range live, because the next iteration reaches it. Run to a fixpoint
+	// for nested and overlapping loops - an outer back edge can be pulled past
+	// an inner one's end. A program with no backward branch is unaffected, and
+	// so is a loop whose reader already sits last.
+	bool branchTargetLabel( const Token& token, std::string& label );
+
+	void extendFlagLivenessAcrossBackEdges( const std::list<Token>& tokens,
+	                                        VuFlagLiveness& liveness )
+	{
+		std::vector<const Token*> indexed;
+		std::map<std::string, unsigned int> labels;
+		unsigned int index = 0;
+		for( std::list<Token>::const_iterator i = tokens.begin(); i != tokens.end(); ++i, ++index )
+		{
+			indexed.push_back( &*i );
+			if( (*i).label().length() != 0 )
+				labels[(*i).label()] = index;
+		}
+
+		std::vector<std::pair<unsigned int, unsigned int> > backEdges;   // (target, branch)
+		for( unsigned int b = 0; b < indexed.size(); ++b )
+		{
+			std::string label;
+			if( !branchTargetLabel( *indexed[b], label ) )
+				continue;
+			std::map<std::string, unsigned int>::const_iterator t = labels.find( label );
+			if( t == labels.end() || t->second > b )
+				continue;
+			backEdges.push_back( std::make_pair( t->second, b ) );
+		}
+		if( backEdges.empty() )
+			return;
+
+		bool changed = true;
+		for( int guard = 0; changed && guard < 64; ++guard )
+		{
+			changed = false;
+			for( unsigned int e = 0; e < backEdges.size(); ++e )
+			{
+				const int lo = static_cast<int>( backEdges[e].first );
+				const int hi = static_cast<int>( backEdges[e].second );
+				if( liveness.lastMacReader >= lo && liveness.lastMacReader < hi )
+				{
+					liveness.lastMacReader = hi;
+					changed = true;
+				}
+				if( liveness.lastClipReader >= lo && liveness.lastClipReader < hi )
+				{
+					liveness.lastClipReader = hi;
+					changed = true;
+				}
+				if( liveness.lastStatusReader >= lo && liveness.lastStatusReader < hi )
+				{
+					liveness.lastStatusReader = hi;
+					changed = true;
+				}
+			}
+		}
+	}
+
 	VuFlagLiveness analyzeFlagLiveness( const std::list<Token>& tokens )
 	{
 		VuFlagLiveness liveness;
@@ -1307,6 +1381,7 @@ const unsigned int VU_PAIR_CYCLES_PER_WORD = 4;
 				liveness.lastStatusReader = static_cast<int>( index );
 			liveness.declaredLiveResources |= vuDeclaredHardwareResource( *i );
 		}
+		extendFlagLivenessAcrossBackEdges( tokens, liveness );
 		return liveness;
 	}
 
@@ -6808,6 +6883,13 @@ std::list<Token> flattenVuScheduledProgramTokens( const VuScheduledProgram& prog
 unsigned int vuIgnoredFlagWawResourcesForRemaining( std::list<Token>::const_iterator begin,
                                                     std::list<Token>::const_iterator end )
 {
+	return vuIgnoredFlagWawResourcesForRemaining( begin, begin, end );
+}
+
+unsigned int vuIgnoredFlagWawResourcesForRemaining( std::list<Token>::const_iterator programBegin,
+                                                    std::list<Token>::const_iterator begin,
+                                                    std::list<Token>::const_iterator end )
+{
 	bool readsMac = false;
 	bool readsClip = false;
 	bool readsStatus = false;
@@ -6818,6 +6900,35 @@ unsigned int vuIgnoredFlagWawResourcesForRemaining( std::list<Token>::const_iter
 		readsClip = readsClip || tokenReadsClip( *i );
 		readsStatus = readsStatus || tokenReadsStatus( *i );
 		declared |= vuDeclaredHardwareResource( *i );
+	}
+
+	// The same back edge the scheduler's liveness has to cross. "Remaining" is
+	// the rest of the LIST; a loop's remaining execution includes everything
+	// from the back edge's target, which is behind `begin`. A reader there is
+	// reached by the next iteration, so a writer here is not dead. Only the
+	// labels the remaining range actually branches BACK to are re-scanned, so a
+	// straight-line tail costs nothing and behaves exactly as before.
+	std::set<std::string> backTargets;
+	for( std::list<Token>::const_iterator i = begin; i != end; ++i )
+	{
+		std::string label;
+		if( branchTargetLabel( *i, label ) )
+			backTargets.insert( label );
+	}
+	if( !backTargets.empty() && begin != programBegin )
+	{
+		bool inLoop = false;
+		for( std::list<Token>::const_iterator i = programBegin; i != begin; ++i )
+		{
+			if( (*i).label().length() != 0
+			    && backTargets.find( (*i).label() ) != backTargets.end() )
+				inLoop = true;
+			if( !inLoop )
+				continue;
+			readsMac = readsMac || tokenReadsMac( *i );
+			readsClip = readsClip || tokenReadsClip( *i );
+			readsStatus = readsStatus || tokenReadsStatus( *i );
+		}
 	}
 
 	unsigned int mask = VU_RESOURCE_NONE;

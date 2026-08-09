@@ -549,6 +549,13 @@ std::list<Token> flattenVuScheduledProgramTokens( const VuScheduledProgram& prog
 unsigned int vuScheduledProgramEmittedWordCount( const VuScheduledProgram& program );
 unsigned int vuIgnoredFlagWawResourcesForRemaining( std::list<Token>::const_iterator begin,
                                                     std::list<Token>::const_iterator end );
+// The three-iterator form knows where the PROGRAM starts, not just where the
+// remaining range does, so a back edge out of the remaining range can be
+// followed to the readers ahead of it. The two-iterator form is the old
+// behaviour and is what a caller with no list start can still ask for.
+unsigned int vuIgnoredFlagWawResourcesForRemaining( std::list<Token>::const_iterator programBegin,
+                                                    std::list<Token>::const_iterator begin,
+                                                    std::list<Token>::const_iterator end );
 VuScheduledPaddingKind vuScheduledPaddingKindForReadHazard( const Token& token,
                                                             const Token* partner,
                                                             const VuLatencyTracker& latencyTracker,

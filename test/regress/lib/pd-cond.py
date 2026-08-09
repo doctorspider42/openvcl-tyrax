@@ -185,6 +185,13 @@ QSCALE = float(os.environ.get("PB_QLAT_SCALE", 1.0))
 # UNJUDGEABLE rather than reported.  Reporting it instead is how the first
 # run of this oracle "found" a miscompile in 38 of the 70 real programs.
 HW_MARGIN = int(os.environ.get("PB_HW_MARGIN", 0))
+# What a margin does to a program.  "reject" is the original behaviour: one
+# ambiguous Q or P read and the WHOLE program is unjudgeable - at margin 2 that
+# is 175 of 480, and everything else those programs compute goes uninspected
+# with it.  "taint" marks only the ambiguous VALUE and drops the observables and
+# conditions that rest on it, so the rest of the program is still compared. The
+# tainted count is reported, so the gap is a number instead of a silence.
+MARGIN_MODE = os.environ.get("PB_MARGIN_MODE", "reject")
 # The condition extension.  PD_COND=0 reproduces pb-dag.py exactly.
 DO_COND = os.environ.get("PD_COND", "1") == "1"
 # How an equality test is normalised.  "diff" records min(a-b, b-a); "pair"
@@ -196,8 +203,15 @@ EQ_NORM = os.environ.get("PD_EQ_NORM", "diff")
 # compares it anyway, which is only useful for measuring how many there are.
 OPAQUE = os.environ.get("PD_OPAQUE", "skip")
 
+# `--` and `*`/`/` are tokens.  Without them the tokeniser DROPPED the `--` of a
+# pre-decrement - `lqd VF01,(--VI02)` read as the plain `(VI02)` the mnemonic
+# never means - and truncated a multiplicative offset at the operator, so
+# `lq v0, 2*3+1(base)` modelled as offset 4.  Both are silent: the model just
+# addressed the wrong quadword and said nothing.  `--` is placed AFTER the
+# number alternatives so `iaddi VI01,VI01,-1` still tokenises as `-1`.
 TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*(?:\.[a-zA-Z]+)?|0[xX][0-9a-fA-F]+"
-                   r"|[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+|[,()\[\]]|\+\+")
+                   r"|[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+|[,()\[\]]|\+\+"
+                   r"|--|[*/]")
 STALL = re.compile(r"STALL_[A-Z_]*\s*\?(\d+)")
 BITMARK = re.compile(r"\[[EDTI]\]")
 
@@ -442,8 +456,14 @@ class Parser(object):
                 while j < len(piece) and piece[j] != ")":
                     inner.append(piece[j])
                     j += 1
-                names = [x for x in inner if x != "++"]
-                ops.append(("(base)", names[0] if names else None, "++" in inner))
+                # The third element is the addressing MODE as written: "++",
+                # "--" or "".  It used to be a bool that only knew about "++",
+                # which made `(--VI02)` indistinguishable from `(VI02)` and
+                # (because `--` was not even a token) left the register name as
+                # the first thing inside the bracket either way.
+                mode = "++" if "++" in inner else ("--" if "--" in inner else "")
+                names = [x for x in inner if x not in ("++", "--")]
+                ops.append(("(base)", names[0] if names else None, mode))
                 i = j + 1
                 continue
             if t == "[":
@@ -499,6 +519,47 @@ def parse_int(t):
         return None
 
 
+def eval_offset(toks):
+    """Evaluate a run of offset tokens: signed integers joined by `*` and `/`.
+
+    VCL evaluates the offset as an EXPRESSION and truncates the result like C
+    integer division (CodeGenerator writes `static_cast<long>(e.result())`), so
+    the emitted program carries the folded constant.  Summing the tokens - which
+    is all this did - is exact for `4 + 36` and `956+0`, the only shapes any
+    real source here uses, and off by one for `2*3+1`.  A model that disagrees
+    with BOTH assemblers is an instrument defect, and this one showed up as
+    exactly that: af_expr_offset divergent against openvcl and against SCE.
+    """
+    total = 0
+    cur = None
+    op = None
+    for t in toks:
+        if t in ("*", "/"):
+            if cur is None or op is not None:
+                return None
+            op = t
+            continue
+        v = parse_int(t)
+        if v is None:
+            return None
+        if op is not None:
+            if op == "/" and v == 0:
+                return None
+            cur = cur * v if op == "*" else int(float(cur) / v)
+            op = None
+        else:
+            if cur is not None:
+                total += cur
+            cur = v
+    if op is not None:
+        return None
+    return total + (cur or 0)
+
+
+def is_offset_token(t):
+    return t in ("*", "/") or parse_int(t) is not None
+
+
 def imm_at(ops, k):
     """The immediate at operand k, as a SUM of the tokens that make it up.
 
@@ -509,19 +570,12 @@ def imm_at(ops, k):
     divergent on three stores per triangle.  Same mistake as the load offsets,
     one operand position over.
     """
-    if k >= len(ops):
+    if k >= len(ops) or parse_int(ops[k][0]) is None:
         return None
-    v = parse_int(ops[k][0])
-    if v is None:
-        return None
-    j = k + 1
-    while j < len(ops):
-        w = parse_int(ops[j][0])
-        if w is None:
-            break
-        v += w
+    j = k
+    while j < len(ops) and is_offset_token(ops[j][0]):
         j += 1
-    return v
+    return eval_offset([o[0] for o in ops[k:j]])
 
 
 BINOP = {"add": "ADD", "sub": "SUB", "mul": "MUL", "max": "MAX", "mini": "MINI",
@@ -641,6 +695,47 @@ def has_input(v):
     return found
 
 
+_AMBIG_CACHE = {}
+
+
+def has_ambig(v):
+    """Does this expression rest on a Q or P read the margin cannot decide?
+
+    Iterative for the reason has_input is: a trace through three loop
+    iterations nests thousands of nodes deep, and a predicate that raises
+    RecursionError reads as "nothing tainted here" - which is the same shape of
+    silence this whole mode exists to remove.
+    """
+    r = _AMBIG_CACHE.get(v)
+    if r is not None:
+        return r
+    seen = set()
+    stack = [v]
+    found = False
+    while stack:
+        u = stack.pop()
+        c = _AMBIG_CACHE.get(u)
+        if c is True:
+            found = True
+            break
+        if c is False or u in seen:
+            continue
+        seen.add(u)
+        t = nd(u)
+        if t[0] == "ambig":
+            found = True
+            break
+        for x in t[1:]:
+            for y in (x if isinstance(x, tuple) else (x,)):
+                if isinstance(y, R):
+                    stack.append(y)
+    if not found:
+        for u in seen:
+            _AMBIG_CACHE[u] = False
+    _AMBIG_CACHE[v] = found
+    return found
+
+
 def cond_of(m, ins):
     """(key, folded-value-or-None, opaque) for one conditional branch.
 
@@ -709,6 +804,10 @@ class Machine(object):
         self.irow = 0         # INSTRUCTION rows; stalls excluded, see window()
         self.gen = 0          # back edges taken so far
         self.xcount = {}      # xtop/xitop executions so far
+        # Set when a policy forced an edge the SOURCE's own folded condition
+        # says cannot be taken.  See the reachability note in run_trace.
+        self.infeasible = False
+        self.tainted = 0      # ambiguous Q/P reads under PB_MARGIN_MODE=taint
 
     def pending(self, lst, row, cur):
         """The value a fixed-latency unit holds at `row`.
@@ -727,10 +826,18 @@ class Machine(object):
             elif row - r >= lat - self.margin:
                 # inside the stall model's error bar: it MIGHT have landed
                 opt = val
-        if opt != v and self.doubt is None:
-            self.doubt = ("a producer lands within %d cycles of its consumer, "
-                          "which is inside the modelled interlock's error bar"
-                          % self.margin)
+        if opt != v:
+            if MARGIN_MODE == "taint":
+                # Both readings are recorded in one node, so anything built on
+                # it carries the doubt with it and can be dropped at comparison
+                # time. Interned like every other node, so the source and the
+                # emitted program agree on it whenever they agree on both arms.
+                self.tainted += 1
+                return N("ambig", v, opt)
+            if self.doubt is None:
+                self.doubt = ("a producer lands within %d cycles of its "
+                              "consumer, which is inside the modelled "
+                              "interlock's error bar" % self.margin)
         return v
 
     def begin_row(self, row, irow):
@@ -887,14 +994,11 @@ def address(m, ops):
     for k, (name, sel, inc) in enumerate(ops):
         if name != "(base)":
             continue
-        off = 0
         j = k - 1
-        while j >= 0:
-            v = parse_int(ops[j][0])
-            if v is None:
-                break
-            off += v
+        while j >= 0 and is_offset_token(ops[j][0]):
             j -= 1
+        off = eval_offset([o[0] for o in ops[j + 1:k]])
+        off = 0 if off is None else off
         if sel is None:
             return N("addr", ZERO, off)
         root, kb = split_off(m.ivalue(sel))
@@ -902,10 +1006,61 @@ def address(m, ops):
     return N("addr", ZERO, 0)
 
 
-def postinc(m, ops):
-    for name, sel, inc in ops:
-        if name == "(base)" and inc and sel:
-            m.vi[sel.upper()] = iadd_norm(m.ivalue(sel), N("const", 1), 1)
+# The auto-modifying memory forms, keyed on the MNEMONIC.  The mnemonic is what
+# the hardware executes; the `++`/`--` in the operand text is decoration the
+# assembler prints, and one of the two assemblers here got that decoration wrong
+# while the mnemonic stayed right.  Driving the semantics off the text would
+# have modelled the bug instead of finding it.
+AUTO_INC = {"lqi", "sqi"}
+AUTO_DEC = {"lqd", "sqd"}
+
+
+def autobase(ops):
+    """(register, mode-as-written) of the (base) operand."""
+    for name, sel, mode in ops:
+        if name == "(base)":
+            return sel, (mode if isinstance(mode, str) else ("++" if mode else ""))
+    return None, ""
+
+
+def advance(m, ops, delta):
+    sel, _ = autobase(ops)
+    if sel:
+        m.vi[sel.upper()] = iadd_norm(m.ivalue(sel), N("const", abs(delta)),
+                                      1 if delta > 0 else -1)
+
+
+def addr_form_problems(prog):
+    """Rows whose operand text contradicts the mnemonic's addressing mode.
+
+    `lqd` IS a pre-decrement and `lqi` IS a post-increment; the bracket has to
+    say the same thing the opcode does or the row is not the row the assembler
+    thinks it emitted.  dvp-as rejects the mismatch outright, so this is a
+    static check and not a value comparison - but it belongs in the oracle
+    because "openvcl produced a program dvp-as will not take" and "openvcl
+    produced a program that computes the wrong thing" are the same failure of
+    the same pass, and only one of them has ever been looked for.
+    """
+    out = []
+    for payload, _ in prog.rows:
+        for ins in payload:
+            if ins.mn not in STORES and ins.mn not in LOADS:
+                continue
+            sel, mode = autobase(ins.ops)
+            if sel is None:
+                continue
+            want = ("++" if ins.mn in AUTO_INC
+                    else "--" if ins.mn in AUTO_DEC else "")
+            if mode != want:
+                out.append(("ADDR-FORM",
+                            "%s is %s but the operand is written (%s%s%s)"
+                            % (ins.mn,
+                               "a post-increment" if want == "++" else
+                               "a pre-decrement" if want == "--" else
+                               "a plain indirect",
+                               "--" if mode == "--" else "", sel,
+                               "++" if mode == "++" else "")))
+    return out
 
 
 def step(m, ins, row):
@@ -916,6 +1071,11 @@ def step(m, ins, row):
 
     if mn in STORES:
         src, sel, _ = ops[0]
+        # A pre-decrement modifies the base BEFORE the access and a
+        # post-increment after it.  Order matters: `sqd v,(--p)` writes p-1 and
+        # leaves p-1 behind, `sqi v,(p++)` writes p and leaves p+1.
+        if mn in AUTO_DEC:
+            advance(m, ops, -1)
         addr = address(m, ops)
         if mn.startswith("is"):
             m.obs.append(N("isw", addr, dest_mask(ins, "x"), m.ivalue(src)))
@@ -923,13 +1083,16 @@ def step(m, ins, row):
             mask = dest_mask(ins)
             m.obs.append(N("sq", addr, mask,
                            tuple(m.vfield(src, sel, f) for f in mask)))
-        postinc(m, ops)
+        if mn in AUTO_INC:
+            advance(m, ops, 1)
         return
     if mn == "xgkick":
         m.obs.append(N("xgkick", m.ivalue(d)))
         return
 
     if mn in LOADS:
+        if mn in AUTO_DEC:
+            advance(m, ops, -1)
         addr = address(m, ops)
         ep = m.gen if LOAD_EPOCH else 0
         if mn.startswith("il"):
@@ -937,7 +1100,8 @@ def step(m, ins, row):
         else:
             for f in dest_mask(ins):
                 m.vf[(d.upper(), f)] = N("load", addr, f, ep)
-        postinc(m, ops)
+        if mn in AUTO_INC:
+            advance(m, ops, 1)
         return
 
     if mn in INT_FOLD:
@@ -1215,16 +1379,25 @@ def writes(ins):
     """[((kind, name, field), latency)]."""
     out = []
     mn, ops = ins.mn, ins.ops
+    # lqi/lqd/sqi/sqd write their ADDRESS REGISTER as well.  A store writes
+    # nothing else, so the auto forms were the one kind of store with a register
+    # write and the early return dropped it - the interlock model then let a
+    # reader of the pointer issue in the same cycle.
+    auto = []
+    if mn in AUTO_INC or mn in AUTO_DEC:
+        sel, _ = autobase(ops)
+        if sel and sel.upper() not in ("VI00", "VI0"):
+            auto = [(("vi", sel.upper(), "x"), INT_LAT)]
     if not ops or mn in STORES or mn in ("xgkick", "clip", "clipw",
                                              "waitq", "waitp", "loi"):
-        return out
+        return out + auto
     d = ops[0][0].upper()
     if mn in ILOAD:
-        return [(("vi", d, "x"), ILOAD_LAT)]
+        return [(("vi", d, "x"), ILOAD_LAT)] + auto
     if mn in INTALU:
         return [(("vi", d, "x"), INT_LAT)]
     if mn in VLOAD:
-        return [(("vf", d, f), VLOAD_LAT) for f in mask_of(ins)]
+        return [(("vf", d, f), VLOAD_LAT) for f in mask_of(ins)] + auto
     if mn in ("mfir", "mfp", "rnext", "rget"):
         return [(("vf", d, f), FMAC_LAT) for f in mask_of(ins)]
     if mn in FMAC:
@@ -1449,6 +1622,20 @@ def run_trace(prog, sem, has_delay, decide, unroll=UNROLL):
         if br.mn in COND:
             take = bool(decide(len(decisions), br.mn, tgt,
                                prog.labels[tgt] <= pc, visits.get(tgt, 0)))
+            # IS THIS EDGE REACHABLE AT ALL?  The policies force both sides of
+            # every branch, including ones whose operand this walk has already
+            # folded to a constant - `ibgtz` on const(-7) cannot be taken, and a
+            # finding on the taken side of it is a finding about code that never
+            # runs.  Nothing here refused such a path before, so the residual
+            # could not say how much of itself was unreachable.  Only the SOURCE
+            # walk decides this: it is the specification, and a constant in the
+            # emitted program is a fact about the emitted program.
+            if sem:
+                folded = cond_of(m, br)[1]
+                if folded is not None:
+                    real = cond_outcome(br.mn, folded)
+                    if real is not None and bool(real) != take:
+                        m.infeasible = True
             decisions.append(take)
         else:
             take = True
@@ -1484,7 +1671,7 @@ def run_trace(prog, sem, has_delay, decide, unroll=UNROLL):
         pc = prog.labels[tgt]
     if m.doubt:
         raise Unsupported(m.doubt)
-    return m.obs, tuple(keys), decisions, m.conds
+    return m.obs, tuple(keys), decisions, m.conds, m.infeasible
 
 
 # ------------------------------------------------------------------ policies
@@ -1570,6 +1757,12 @@ def compare(want, got):
     """
     from collections import Counter
     problems = []
+    if MARGIN_MODE == "taint":
+        # Dropped from BOTH sides. An observable that rests on an undecidable
+        # read is not evidence either way, and keeping it on one side only
+        # would turn the doubt into a finding.
+        want = [o for o in want if not has_ambig(o)]
+        got = [o for o in got if not has_ambig(o)]
     cw, cg = Counter(want), Counter(got)
     if cw != cg:
         diff = (cw - cg) + (cg - cw)
@@ -1635,6 +1828,13 @@ def compare_conds(keys, want, got):
         # names cannot be paired anyway.  A source condition that is properly
         # defined and an emitted one that is not is the emitted program having
         # LOST the computation, which is a finding and one of the worse ones.
+        if MARGIN_MODE == "taint" and (has_ambig(kw) or has_ambig(kg)):
+            # A condition resting on an undecidable Q or P read joins the
+            # unjudgeable count rather than the findings, on the same terms as
+            # an opaque register: the doubt is the instrument's, not the
+            # compiler's.
+            opaque += 1
+            continue
         if OPAQUE == "skip" and ow:
             opaque += 1
             continue
@@ -1684,13 +1884,18 @@ def judge(sprog, eprog, name):
     # "nothing was reported".
     allsites = set(i for i, b in enumerate(sprog.branch)
                    if b is not None and b.mn in COND)
+    # Static, path-independent, and checked on the EMITTED program only: the
+    # source is the specification, so a source that spells an addressing mode
+    # the assembler will not take is a source bug, not a compiler bug.
+    for kind, text in addr_form_problems(eprog):
+        problems.append((kind, text, "static"))
     try:
         nbranch = len(run_trace(sprog, True, False, pol_fall)[2])
     except (Unsupported, Budget):
         nbranch = 0
     for pname, pol in policies(nbranch):
         try:
-            want, kw, decisions, cw = run_trace(sprog, True, False, pol)
+            want, kw, decisions, cw, infeasible = run_trace(sprog, True, False, pol)
         except (Unsupported, Budget) as e:
             return (0, [("SRC-%s" % type(e).__name__.upper(), str(e), pname)],
                     0, 0, 0, 0, len(allsites))
@@ -1699,7 +1904,7 @@ def judge(sprog, eprog, name):
             continue
         seen.add(key)
         try:
-            got, kg, _, cg = run_trace(eprog, False, True, replay(decisions))
+            got, kg, _, cg, _ = run_trace(eprog, False, True, replay(decisions))
         except (Unsupported, Budget) as e:
             problems.append(("EMIT-%s" % type(e).__name__.upper(), str(e), pname))
             continue
@@ -1720,6 +1925,11 @@ def judge(sprog, eprog, name):
                              % (i, kw[i] if i < len(kw) else "(end)",
                                 kg[i] if i < len(kg) else "(end)"), pname))
             continue
+        # A problem seen only where the source's own condition folds against the
+        # forced edge is a problem about unreachable code.  Tagged, not dropped:
+        # the path policy is what made it unreachable, and the reader is owed
+        # the distinction rather than a silently smaller number.
+        tag = "-UNREACHABLE" if infeasible else ""
         if DO_COND:
             cprobs, nopq, nsym = compare_conds(kw, cw, cg)
             nc += len(cw)
@@ -1727,9 +1937,9 @@ def judge(sprog, eprog, name):
             nsy += nsym
             sites.update(c[3] for c in cw)
             for kind, text in cprobs:
-                problems.append((kind, text, pname))
+                problems.append((kind + tag, text, pname))
         for kind, text, sample in compare(want, got):
-            problems.append((kind, text, pname))
+            problems.append((kind + tag, text, pname))
             if kind == "MULTISET":
                 ws = sorted(set(want) - set(got))
                 gs = sorted(set(got) - set(want))

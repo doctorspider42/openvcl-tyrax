@@ -1080,7 +1080,7 @@ bool CodeGenerator::beginProcess(const std::list<Token>& tokens)
 
 		for( std::list<Token>::iterator k = workTokens.begin(); k != workTokens.end(); )
 		{
-			m_ignoredImplicitWawResources = ignoredImplicitWawResourcesForRemaining(k, workTokens.end());
+			m_ignoredImplicitWawResources = ignoredImplicitWawResourcesForRemaining(workTokens.begin(), k, workTokens.end());
 
 		if( tryEmitKnownLoopOptimization(workTokens, k) )
 		{
@@ -3011,10 +3011,11 @@ void CodeGenerator::recordRegisterWrites( const Token& token, int issueCycle )
 	m_latencyTracker.recordWrites( token, issueCycle, emitsAsUpperMove( token ) );
 }
 
-unsigned int CodeGenerator::ignoredImplicitWawResourcesForRemaining( std::list<Token>::const_iterator begin,
+unsigned int CodeGenerator::ignoredImplicitWawResourcesForRemaining( std::list<Token>::const_iterator programBegin,
+                                                                     std::list<Token>::const_iterator begin,
                                                                      std::list<Token>::const_iterator end ) const
 {
-	return vuIgnoredFlagWawResourcesForRemaining( begin, end );
+	return vuIgnoredFlagWawResourcesForRemaining( programBegin, begin, end );
 }
 
 void CodeGenerator::fillBranchDelaySlots( std::list<Token>& tokens ) const

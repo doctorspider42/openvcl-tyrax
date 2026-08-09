@@ -34,6 +34,10 @@ status_lastwriter	ORDER	-	status non-sticky half	a mask naming a non-sticky bit 
 status_lastwriter_hoist	ORDER	-	status non-sticky half	the hoist that the pinning above prevents
 lfc3	VALUE	-	loop-carried liveness	a value carried across a back edge kept a range ending at its last use inside the body; broken on stock upstream, fixed by --loop-liveness-always
 lfc4	VALUE	-	loop-carried liveness (control)	the same shape without a branch must be correct everywhere - if this ever fails the fix has broken the straight-line case
+clip_loop_window	PATH	-	CLIP liveness across a back edge	"last CLIP reader" was a POSITION in the token list, so two clipw in a loop's last block sat past it and read as dead; the writer chain was dropped and --fmac-interlock issued the ready one first, handing the next iteration's fceq a window with two entries transposed
+clip_loop_window_ok	PATH	-	CLIP liveness across a back edge (control)	the same loop with the reader AFTER both writers, which was already correct - if this ever fails the back-edge extension has started ordering clipw that nothing reads
+predec_addressing	COND	-	pre-decrement emitted as post-increment	the parser tagged a PREDEC argument with the POSTINC flag, so Argument::PREDEC was never set on anything, the emitter's `--` branch was dead and every lqd/sqd came out as `(VIxx++)` - which dvp-as rejects, so no source using pre-decrement addressing could be built at all
+postinc_addressing	COND	-	pre-decrement emitted as post-increment (control)	the post-increment half of the same operand path, which was always right - the fix must not swap the two flags over
 # --- known-unjudgeable, recorded rather than asserted ---
 mac_latency	XFAIL	-	no MAC oracle	neither assembler preserves MAC-flag provenance: SCE inserts filler FMACs above an fmand and deletes dead ones, so there is no valid cross-assembler comparison. Zero MAC readers exist in the engine corpus
 efu_pair	XFAIL	-	EFU completion timing	Sony places NOP rows so an mfp lands between two eleng completions; judging that needs a cycle model, and guessing at one is the mistake this effort has already made twice

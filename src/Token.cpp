@@ -669,7 +669,14 @@ bool Token::extractRegister( std::string name, Argument& argument, unsigned int 
 				return false;
 
 			start += 2;
-			argument.setFlags( argument.flags() | Argument::POSTINC );			
+			// PREDEC, not POSTINC.  `Argument::PREDEC` is the flag the emitter
+			// tests to write `(--VI02)` back out (CodeGenerator::emitArgument);
+			// tagging a pre-decrement as a post-increment meant the flag was
+			// never set on any argument in the program, the emitter's `--`
+			// branch was dead, and every `lqd`/`sqd` came out as
+			// `lqd VF01,(VI02++)` - which dvp-as rejects, so no source using
+			// pre-decrement addressing could be built at all.
+			argument.setFlags( argument.flags() | Argument::PREDEC );
 		}
 
 		std::string extra = name.substr(name.find(')',stop)+1);
