@@ -77,7 +77,12 @@ VALUE_OUT="$(python3 "$HERE/lib/pa-dag.py"       "$ISA" "$OUT/src" "$OUT/vsm" 2>
 # loop-carried or branch-conditional defect - three cases in this suite passed
 # under it on a build that had the bug, which is an assertion that cannot fail.
 PATH_OUT="$(python3 "$HERE/lib/pb-dag.py"       "$ISA" "$OUT/src" "$OUT/vsm" 2>&1 || true)"
-[ "$VERBOSE" = "--verbose" ] && { echo "--- p8-flagorder"; echo "$ORDER_OUT"; echo "--- pa-dag"; echo "$VALUE_OUT"; echo "--- pb-dag"; echo "$PATH_OUT"; }
+# COND compares, at every conditional branch, the expression the branch TESTS.
+# The other three kinds compare values that are STORED, so a value whose only
+# reader is a branch condition was never compared at all - which is why four
+# rounds of value oracles walked past the delay-slot bug.
+COND_OUT="$(python3 "$HERE/lib/pd-cond.py"       "$ISA" "$OUT/src" "$OUT/vsm" 2>&1 || true)"
+[ "$VERBOSE" = "--verbose" ] && { echo "--- p8-flagorder"; echo "$ORDER_OUT"; echo "--- pa-dag"; echo "$VALUE_OUT"; echo "--- pb-dag"; echo "$PATH_OUT"; echo "--- pd-cond"; echo "$COND_OUT"; }
 
 flagged() {  # flagged <tool-output> <case-name> -> 0 if the tool named this case
     echo "$1" | grep -qE "(^|[^A-Za-z0-9_])$2([^A-Za-z0-9_]|$)"
@@ -100,6 +105,7 @@ for name in "${order[@]}"; do
     ORDER) flagged "$ORDER_OUT" "$name" && { ok=0; detail="flag-order violation"; } ;;
     VALUE) flagged "$VALUE_OUT" "$name" && { ok=0; detail="stored value diverges from the source"; } ;;
     PATH)  flagged "$PATH_OUT"  "$name" && { ok=0; detail="stored value diverges along some path"; } ;;
+    COND)  flagged "$COND_OUT"  "$name" && { ok=0; detail="a branch condition differs from the source"; } ;;
     *)     ok=0; detail="unknown kind $kind" ;;
     esac
     if [ "$ok" = 1 ]; then

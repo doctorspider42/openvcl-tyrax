@@ -10,6 +10,9 @@
 #             see a loop-carried or branch-conditional defect at all.
 # kind VALUE: pa-dag asserts the expression stored at each sq/isw is the one the
 #             source computes, register naming abstracted away.
+# kind COND:  pd-cond asserts the expression a conditional branch TESTS matches
+#             the source. The other kinds compare STORED values, so a value whose
+#             only reader is a branch condition was never compared at all.
 # kind XFAIL: known-unjudgeable - recorded so nobody re-derives why, never failed on.
 #
 clip_liveout	COUNT	clipw:3	CLIP shift register	a later clipw shifts the earlier one up an entry, it does not kill it; --drop-dead-writes deleted 4 of 7 per clip program and the "entirely inside" fast path stopped firing
@@ -43,3 +46,7 @@ delayslot_dead	PATH	-	delay slot (control)	the pointer IS re-initialised at the 
 lfc5	PATH	-	partial-write live-in (control)	first in-loop access is a CONDITIONAL FULL write, already correct because the branch-state join merges the aliases; the fix must not touch it
 clip_pathgap_pz700396	ORDER	-	CLIP window across paths	the emitter padded against the file layout, so a reader four rows below its push was one row below it along a taken branch
 clip_pathgap_ok	ORDER	-	CLIP window across paths (control)	same labelled reader entered by a branch with no path that shortens it - must stay byte-identical, or the pass is padding blind
+cond_clipflag_clobber	COND	-	clip judgement clobbered	VI01 is the only legal destination of fcand/fcor/fceq, so a clip judgement must be read back out of it; the allocator placed a dead ilw in VI01 between the fcor and the ibne that reads it, and the branch tested the load
+cond_clipflag_live	COND	-	clip judgement clobbered (control)	the same shape with the loaded value LIVE, which openvcl already allocates elsewhere - if this ever fails the fix has become a blanket ban on touching VI01
+cond_loop_counter	COND	-	loop-carried integer counter	the in-loop decrement was allocated to a different register from its live-in with no copy on the back edge, so the counter recomputed initial-1 every iteration; fires on stock upstream with no flags
+cond_loop_counter_ok	COND	-	loop-carried integer counter (control)	the same loop with the decrement at the same join, which openvcl carries correctly - the fix must not cost a register on every counted loop
