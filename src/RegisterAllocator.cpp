@@ -17,6 +17,7 @@
 
 #include <iostream>
 #include <iomanip>
+#include <map>
 #include <set>
 #include <vector>
 #include <stdlib.h>
@@ -1098,9 +1099,24 @@ void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsi
 	// next iteration reads whatever that name left. The range has to cover the back edge
 	// too - the file is only 16 registers, so this is where a program that is already
 	// tight will fail loudly instead of quietly computing the wrong thing.
+	// Two sets, because the two things this function does have different costs.
+	// liveInAliases pays for a live range stretched over the whole body and is what
+	// runs a tight program out of registers, so it stays exactly as it was: whole
+	// aliases, first touch decides. carriedAliases only decides which in-loop WRITES
+	// get tied to the alias the readers at the top hold, which lengthens no range -
+	// it merges two - so it can afford to ask the sharper question below.
 	std::set<Alias*> aliases;
 	std::set<Alias*> liveInAliases;
+	std::set<Alias*> carriedAliases;
 	std::set<Alias*> touched;
+	// The sharper question is per FIELD, because a write need not be a definition.
+	// `mul.w carry, ...` names one field; the other three still hold what the
+	// previous iteration left there, so a later `carry[z]` is carried across the
+	// back edge even though the body wrote `carry` first. Reading that as "defined
+	// in the loop" is what puts the update at the bottom in a register the reader at
+	// the top never looks at. Integers have no fields and vuReadFieldMask answers
+	// xyzw for them, so they keep exactly the old meaning: any read before a write.
+	std::map<std::string, unsigned int> writtenFields;
 	for( std::list<Token>::iterator t = tokens.begin(); t != tokens.end(); ++t )
 	{
 		if( t->lineNumber() < loopStart || t->lineNumber() > loopEnd )
@@ -1116,7 +1132,24 @@ void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsi
 			aliases.insert( alias );
 			tokenAliases.insert( alias );
 			if( !(a->flags() & Token::Argument::WRITE) )
+			{
 				readHere.insert( alias );
+				if( !a->alias().empty()
+				    && (vuReadFieldMask( *t, *a ) & ~writtenFields[ a->alias() ]) != 0 )
+					carriedAliases.insert( alias );
+			}
+		}
+
+		// Reads are scored against the mask BEFORE this token's own writes join it,
+		// so `add a, a, b` reads what the previous iteration left - the same reason
+		// the read wins over the write below.
+		for( std::list<Token::Argument>::const_iterator a = t->arguments().begin(); a != t->arguments().end(); ++a )
+		{
+			if( !(a->flags() & Token::Argument::WRITE) )
+				continue;
+			if( a->content() != Token::Argument::ALIAS || a->alias().empty() )
+				continue;
+			writtenFields[ a->alias() ] |= vuWriteFieldMask( *t, *a );
 		}
 
 		// One token can both read and write the same alias (`add a, a, b`), and that
@@ -1130,6 +1163,10 @@ void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsi
 				liveInAliases.insert( *i );
 		}
 	}
+	// Never fewer than before: whatever first-touch liveness already called carried
+	// stays carried, and the field walk only adds to it.
+	for( std::set<Alias*>::iterator i = liveInAliases.begin(); i != liveInAliases.end(); ++i )
+		carriedAliases.insert( *i );
 	if( vuLoopLivenessAlwaysEnabled() )
 		aliases = liveInAliases;
 
@@ -1172,7 +1209,7 @@ void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsi
 	for( std::set<Alias*>::iterator a = aliases.begin(); a != aliases.end(); ++a )
 		(*a)->addRange( loopStart, loopEnd );
 
-	tieCarriedWritesToLiveInAliases( tokens, loopStart, loopEnd, liveInAliases );
+	tieCarriedWritesToLiveInAliases( tokens, loopStart, loopEnd, carriedAliases );
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

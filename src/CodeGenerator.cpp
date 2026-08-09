@@ -24,6 +24,7 @@
 #include "VuTokenResourceAccess.h"
 #include "VuKernelLayout.h"
 #include <cstdlib>
+#include <map>
 #include <set>
 
 #include <iostream>
@@ -1456,6 +1457,11 @@ bool CodeGenerator::beginProcess(const std::list<Token>& tokens)
 		// Do not treat as an error; some VCL programs end in a loop
 	}
 
+	// Last, because it needs the whole program: a forward branch that shortens the
+	// distance to a CLIP reader is not in the emitter's hands until the row it
+	// jumps to has been emitted.
+	padClipFlagWindowAcrossPaths();
+
 	if( m_name.length() > 0 )
 	{
 		// Pad to 16-byte (qword) alignment before _CodeEnd.  Each emitted
@@ -1726,6 +1732,295 @@ unsigned int CodeGenerator::emittedWordCount() const
 			++rows;
 	}
 	return rows + ( rows & 1u );
+}
+
+namespace
+{
+	// Every identifier on an emitted row, lower-cased and cut at its field
+	// selector, in order. `clipw.xyz VF01, VF01` yields clipw, vf01, vf01.
+	//
+	// Whole tokens, not a substring search. emittedRowsSinceClipWrite() below asks
+	// whether the CLIP mnemonic appears anywhere in the line, which also says yes to
+	// a branch whose TARGET LABEL happens to start with the same four letters - a
+	// jump to Lclipcarry3 reads as a CLIP push. None of this engine's programs has
+	// such a label, so that is a latent fragility rather than a live bug, but a pass
+	// that computes distances from those rows cannot afford it.
+	void emittedRowTokens( const std::string& line, std::vector<std::string>& out )
+	{
+		std::string token;
+		for( std::string::size_type i = 0; i <= line.size(); ++i )
+		{
+			const char c = ( i < line.size() ) ? line[i] : ' ';
+			if( isalnum( (unsigned char)c ) || c == '_' || c == '.' )
+			{
+				token += (char)tolower( (unsigned char)c );
+				continue;
+			}
+			if( !token.empty() )
+			{
+				const std::string::size_type dot = token.find( '.' );
+				out.push_back( dot == std::string::npos ? token : token.substr( 0, dot ) );
+				token.clear();
+			}
+		}
+	}
+
+	bool rowHas( const std::vector<std::string>& tokens, const std::string& mnemonic )
+	{
+		if( mnemonic.empty() )
+			return false;
+		for( unsigned int i = 0; i < tokens.size(); ++i )
+		{
+			if( tokens[i] == mnemonic )
+				return true;
+		}
+		return false;
+	}
+
+	std::string emittedLabelName( const std::string& line )
+	{
+		std::string::size_type first = line.find_first_not_of( " \t" );
+		std::string::size_type last = line.find_last_of( ':' );
+		if( first == std::string::npos || last == std::string::npos || last <= first )
+			return std::string();
+		std::string name = line.substr( first, last - first );
+		while( !name.empty() && ( name[name.size() - 1] == ' ' || name[name.size() - 1] == '\t' ) )
+			name.erase( name.size() - 1 );
+		for( unsigned int i = 0; i < name.size(); ++i )
+			name[i] = (char)tolower( (unsigned char)name[i] );
+		return name;
+	}
+}
+
+// The CLIP window is a distance along a PATH, and the emitter measures a file.
+//
+// padForClipFlagWindow() below walks the rows already emitted backwards and stops
+// at a label, which is the right answer to the wrong question. A reader four rows
+// under its push on the page can be one row under it along a taken branch - a
+// forward branch that jumps over the rows between them shortens the distance
+// without moving a word - and a reader entered through a label is exactly the case
+// the backward walk declares unknowable and then does nothing about.
+//
+// So this runs once, over the finished program, on its own control-flow graph:
+// for every CLIP reader, the fewest rows any path executes between a push and that
+// reader, and NOPs above the reader until even the shortest path clears the window.
+// The pads go BELOW the reader's label, so a branch that enters there passes
+// through them too - which is what makes padding a labelled reader meaningful at
+// all.
+//
+// ROWS, NOT CYCLES, AND THAT IS A DELIBERATE OVER-APPROXIMATION. Every row costs
+// at least one cycle, so three rows of separation guarantee the four cycles the
+// window needs; the converse is false, and Sony's vcl lives in the gap - measured
+// over these 70 programs it puts 125 readers closer than three ROWS and is right
+// every time, because it counts the cycles the hardware will stall and writes them
+// down (STALL_LATENCY ?N). Matching that would mean an interlock model deciding
+// what gets emitted, and the one instrument in this work that has such a model
+// needed a fit to Sony's own annotations to reach 99.88%. A sufficient condition
+// costs words nobody needs; a fitted one costs correctness when the fit is wrong.
+void CodeGenerator::padClipFlagWindowAcrossPaths()
+{
+	const unsigned int latency = vuClipFlagVisibilityLatency();
+	if( latency <= 1 )
+		return;
+	// Each insertion can only lengthen distances, never shorten one, so this
+	// terminates; the cap is a guard against a bug in that reasoning, not a
+	// budget.
+	for( unsigned int guard = 0; guard < 4096; ++guard )
+	{
+		if( !insertOneCrossPathClipPad( latency ) )
+			return;
+	}
+}
+
+bool CodeGenerator::insertOneCrossPathClipPad( unsigned int latency )
+{
+	std::vector< std::list<std::string>::iterator > rowIt;
+	std::vector< std::vector<std::string> > rowTokens;
+	std::map<std::string, unsigned int> labels;
+	for( std::list<std::string>::iterator i = m_codeLines.begin(); i != m_codeLines.end(); ++i )
+	{
+		const EmittedLineKind kind = classifyEmittedLine( *i );
+		if( kind == EMITTED_NOTHING )
+			continue;
+		if( kind == EMITTED_LABEL )
+		{
+			const std::string name = emittedLabelName( *i );
+			if( !name.empty() && labels.find( name ) == labels.end() )
+				labels[name] = (unsigned int)rowIt.size();
+			continue;
+		}
+		std::vector<std::string> tokens;
+		emittedRowTokens( *i, tokens );
+		rowIt.push_back( i );
+		rowTokens.push_back( tokens );
+	}
+
+	const unsigned int rowCount = (unsigned int)rowIt.size();
+	if( rowCount == 0 )
+		return false;
+
+	enum { BR_NONE = 0, BR_COND, BR_UNCOND, BR_INDIRECT };
+	const VuInstructionOpcode conditional[6] = { VU_OP_IBEQ, VU_OP_IBGEZ, VU_OP_IBGTZ,
+	                                             VU_OP_IBLEZ, VU_OP_IBLTZ, VU_OP_IBNE };
+	const VuInstructionOpcode pushes[3] = { VU_OP_CLIP, VU_OP_CLIPW, VU_OP_CLIPLW };
+	const VuInstructionOpcode readers[4] = { VU_OP_FCAND, VU_OP_FCOR, VU_OP_FCEQ, VU_OP_FCGET };
+
+	std::vector<int> branchKind( rowCount, BR_NONE );
+	std::vector<unsigned int> branchTarget( rowCount, rowCount );
+	std::vector<char> isPush( rowCount, 0 );
+	std::vector<char> isReader( rowCount, 0 );
+	for( unsigned int i = 0; i < rowCount; ++i )
+	{
+		const std::vector<std::string>& tokens = rowTokens[i];
+		for( int k = 0; k < 3; ++k )
+		{
+			if( rowHas( tokens, vuInstr( pushes[k] ) ) )
+				isPush[i] = 1;
+		}
+		for( int k = 0; k < 4; ++k )
+		{
+			if( rowHas( tokens, vuInstr( readers[k] ) ) )
+				isReader[i] = 1;
+		}
+		if( rowHas( tokens, vuInstr( VU_OP_JR ) ) || rowHas( tokens, vuInstr( VU_OP_JALR ) ) )
+			branchKind[i] = BR_INDIRECT;
+		else if( rowHas( tokens, vuInstr( VU_OP_B ) ) || rowHas( tokens, vuInstr( VU_OP_BAL ) ) )
+			branchKind[i] = BR_UNCOND;
+		else
+		{
+			for( int k = 0; k < 6; ++k )
+			{
+				if( rowHas( tokens, vuInstr( conditional[k] ) ) )
+				{
+					branchKind[i] = BR_COND;
+					break;
+				}
+			}
+		}
+		if( branchKind[i] == BR_COND || branchKind[i] == BR_UNCOND )
+		{
+			// The target is the last token on the row that names a label.
+			for( unsigned int t = (unsigned int)tokens.size(); t > 0; --t )
+			{
+				std::map<std::string, unsigned int>::const_iterator found =
+					labels.find( tokens[t - 1] );
+				if( found != labels.end() )
+				{
+					branchTarget[i] = found->second;
+					break;
+				}
+			}
+		}
+	}
+
+	// A delay slot executes whichever way its branch goes, so the row after a
+	// branch fans out, not the branch row itself.
+	std::vector< std::vector<unsigned int> > successors( rowCount );
+	for( unsigned int i = 0; i < rowCount; ++i )
+	{
+		if( branchKind[i] == BR_NONE )
+		{
+			if( i + 1 < rowCount )
+				successors[i].push_back( i + 1 );
+			continue;
+		}
+		if( branchKind[i] == BR_INDIRECT || i + 1 >= rowCount )
+			continue;
+		successors[i].push_back( i + 1 );
+		const unsigned int slot = i + 1;
+		if( branchTarget[i] < rowCount )
+			successors[slot].push_back( branchTarget[i] );
+		if( branchKind[i] == BR_COND && slot + 1 < rowCount )
+			successors[slot].push_back( slot + 1 );
+	}
+
+	// distance[i] = fewest rows executed strictly between a push and row i.
+	const unsigned int UNREACHED = 0xFFFFu;
+	std::vector<unsigned int> distance( rowCount, UNREACHED );
+	std::list<unsigned int> work;
+	for( unsigned int i = 0; i < rowCount; ++i )
+	{
+		if( !isPush[i] )
+			continue;
+		for( unsigned int s = 0; s < successors[i].size(); ++s )
+		{
+			const unsigned int next = successors[i][s];
+			if( distance[next] != 0 )
+			{
+				distance[next] = 0;
+				work.push_back( next );
+			}
+		}
+	}
+	while( !work.empty() )
+	{
+		const unsigned int i = work.front();
+		work.pop_front();
+		if( isPush[i] )
+			continue;
+		for( unsigned int s = 0; s < successors[i].size(); ++s )
+		{
+			const unsigned int next = successors[i][s];
+			if( distance[i] + 1 < distance[next] )
+			{
+				distance[next] = distance[i] + 1;
+				work.push_back( next );
+			}
+		}
+	}
+
+	// Where a label sits, so the backward walk below can stop at it exactly where
+	// emittedRowsSinceClipWrite() does.
+	std::vector<char> labelled( rowCount, 0 );
+	for( std::map<std::string, unsigned int>::const_iterator i = labels.begin(); i != labels.end(); ++i )
+	{
+		if( i->second < rowCount )
+			labelled[i->second] = 1;
+	}
+
+	for( unsigned int i = 0; i < rowCount; ++i )
+	{
+		if( !isReader[i] || isPush[i] )
+			continue;
+		if( distance[i] == UNREACHED || distance[i] + 1 >= latency )
+			continue;
+		// A delay slot cannot be pushed away from the branch it belongs to; the
+		// scheduler owns that pairing, and no NOP may come between them.
+		if( i > 0 && ( branchKind[i - 1] == BR_COND || branchKind[i - 1] == BR_UNCOND ) )
+			continue;
+
+		// ONLY WHERE THE PAGE AND THE PATH DISAGREE. Where the backward walk
+		// produced a number, that number is a decision already taken about
+		// straight-line code, and this pass does not re-open it: the ps2gl steady
+		// states emit a reader in the row directly under its clipw deliberately,
+		// sized against SCE's own output, and openvcl's own test pins those sizes.
+		// What is left is the case the walk cannot answer - a reader entered
+		// through a label - which it currently answers by doing nothing.
+		unsigned int fileRows = UNREACHED;
+		{
+			unsigned int rows = 0;
+			unsigned int j = i;
+			while( rows <= 32 )
+			{
+				if( labelled[j] || j == 0 )
+					break;
+				--j;
+				if( isPush[j] )
+				{
+					fileRows = rows;
+					break;
+				}
+				++rows;
+			}
+		}
+		if( distance[i] >= fileRows )
+			continue;
+		const unsigned int pad = latency - 1 - distance[i];
+		for( unsigned int p = 0; p < pad; ++p )
+			m_codeLines.insert( rowIt[i], formatRawPairedInstructionLine( vuInstr(VU_OP_NOP), vuInstr(VU_OP_NOP) ) );
+		return true;
+	}
+	return false;
 }
 
 void CodeGenerator::padForClipFlagWindow( const Token& a, const Token* b )
@@ -3035,6 +3330,14 @@ bool CodeGenerator::moveDeadFallthroughIntoBranchDelaySlot( std::list<Token>& to
 		return false;
 	if( !writesAreDeadFromTarget(candidateAccess.registerWrites, target, tokens.end()) )
 		return false;
+	// The straight-line walk above cannot see a path, only a file layout. A
+	// branch below the target that jumps back ABOVE it re-enters rows the walk
+	// never visits, and a forward branch can jump past the write the walk counted
+	// as a kill. Either way it answers "dead" for a register the taken path
+	// reads, and the delay slot then executes a conditional instruction
+	// unconditionally.
+	if( !writesAreDeadFromTargetOnEveryPath(candidateAccess.registerWrites, tokens, target) )
+		return false;
 
 	Token filler = *candidate;
 	filler.setFlags(filler.flags() | Token::BRANCH_DELAY_FILLER);
@@ -3162,6 +3465,153 @@ bool CodeGenerator::writesAreDeadFromTarget( const std::list<std::string>& write
 		if( remaining.empty() )
 			return true;
 	}
+	return true;
+}
+
+// Backward liveness over the token list's own control-flow graph, asked about
+// one point: the branch target. Answering it needs a graph rather than a walk
+// because the only unsafe direction is a path the file order does not show -
+// which is every backward branch, and every forward branch over a kill.
+//
+// Two modelling points that are easy to get wrong:
+//   * a branch delay slot runs on BOTH paths, so when a filler row is already
+//     parked below a branch the control transfer belongs to the FILLER, not to
+//     the branch. Giving the branch the transfer would make the filler
+//     fall-through-only and hide any read it performs from the taken path.
+//   * a successor this cannot name is not an absent successor. A register or
+//     link branch, or a target label that is not in this list, means the graph
+//     is incomplete, and an incomplete graph may not be used to call anything
+//     dead - so those refuse rather than approximate.
+bool CodeGenerator::writesAreDeadFromTargetOnEveryPath( const std::list<std::string>& writes,
+                                                        std::list<Token>& tokens,
+                                                        std::list<Token>::iterator target ) const
+{
+	if( writes.empty() )
+		return true;
+
+	std::vector<Token*> rows;
+	std::map<std::string, unsigned int> labels;
+	unsigned int targetIndex = 0;
+	bool haveTarget = false;
+	for( std::list<Token>::iterator i = tokens.begin(); i != tokens.end(); ++i )
+	{
+		if( i->label().length() != 0 && labels.find(i->label()) == labels.end() )
+			labels[i->label()] = (unsigned int)rows.size();
+		if( i == target )
+		{
+			targetIndex = (unsigned int)rows.size();
+			haveTarget = true;
+		}
+		rows.push_back( &*i );
+	}
+	if( !haveTarget )
+		return false;
+
+	const unsigned int rowCount = (unsigned int)rows.size();
+	std::vector< std::vector<unsigned int> > successors( rowCount );
+	for( unsigned int i = 0; i < rowCount; ++i )
+	{
+		VuTokenResourceAccess access;
+		const bool haveAccess = buildVuTokenResourceAccess( *rows[i], access );
+		const bool isBranch = haveAccess && (access.instructionFlags & VU_INSTR_BRANCH) != 0;
+
+		// The row that actually transfers control: the branch itself, or the
+		// filler already sitting in its delay slot.
+		const Token* transferBranch = NULL;
+		unsigned int transferRow = i;
+		if( isBranch )
+		{
+			if( i + 1 < rowCount && (rows[i + 1]->flags() & Token::BRANCH_DELAY_FILLER) )
+			{
+				successors[i].push_back( i + 1 );
+				continue;
+			}
+			transferBranch = rows[i];
+		}
+		else if( i > 0 && (rows[i]->flags() & Token::BRANCH_DELAY_FILLER) )
+		{
+			VuTokenResourceAccess previous;
+			if( buildVuTokenResourceAccess( *rows[i - 1], previous )
+			    && (previous.instructionFlags & VU_INSTR_BRANCH) )
+			{
+				transferBranch = rows[i - 1];
+				access = previous;
+			}
+		}
+
+		if( transferBranch )
+		{
+			if( access.instructionFlags & (VU_INSTR_LINK_BRANCH | VU_INSTR_REGISTER_BRANCH) )
+				return false;
+			std::string label;
+			if( !branchTargetLabel( *transferBranch, label ) )
+				return false;
+			std::map<std::string, unsigned int>::const_iterator found = labels.find( label );
+			if( found == labels.end() )
+				return false;
+			successors[transferRow].push_back( found->second );
+			if( !(access.instructionFlags & VU_INSTR_UNCONDITIONAL_BRANCH)
+			    && transferRow + 1 < rowCount )
+				successors[transferRow].push_back( transferRow + 1 );
+			continue;
+		}
+
+		if( i + 1 < rowCount )
+			successors[i].push_back( i + 1 );
+	}
+
+	for( std::list<std::string>::const_iterator w = writes.begin(); w != writes.end(); ++w )
+	{
+		std::vector<char> reads( rowCount, 0 );
+		std::vector<char> kills( rowCount, 0 );
+		std::vector<char> live( rowCount, 0 );
+		for( unsigned int i = 0; i < rowCount; ++i )
+		{
+			VuTokenResourceAccess access;
+			if( !buildVuTokenResourceAccess( *rows[i], access ) )
+				continue;
+			// Read before write, so a read-modify-write row (`iaddi x, x, -1`)
+			// is a use and not a kill.
+			if( containsKey( access.registerReads, *w )
+			    || (access.hasMemoryBase && access.memoryBaseRegister == *w) )
+				reads[i] = 1;
+			else if( containsKey( access.registerWrites, *w ) )
+				kills[i] = 1;
+		}
+
+		bool changed = true;
+		while( changed )
+		{
+			changed = false;
+			for( unsigned int j = rowCount; j > 0; --j )
+			{
+				const unsigned int i = j - 1;
+				char value = 0;
+				if( reads[i] )
+					value = 1;
+				else if( !kills[i] )
+				{
+					for( unsigned int s = 0; s < successors[i].size(); ++s )
+					{
+						if( live[successors[i][s]] )
+						{
+							value = 1;
+							break;
+						}
+					}
+				}
+				if( value != live[i] )
+				{
+					live[i] = value;
+					changed = true;
+				}
+			}
+		}
+
+		if( live[targetIndex] )
+			return false;
+	}
+
 	return true;
 }
 

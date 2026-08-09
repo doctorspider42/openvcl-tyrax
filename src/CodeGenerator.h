@@ -84,6 +84,8 @@ private:
 	void padForBranchPreBubble( const Token& token );
 	void padForClipFlagWindow( const Token& a, const Token* b );
 	unsigned int emittedRowsSinceClipWrite() const;
+	void padClipFlagWindowAcrossPaths();
+	bool insertOneCrossPathClipPad( unsigned int latency );
 	bool slotCanBecomeBranchDelayFiller( const VuScheduledIssueSlot& slot,
 	                                     const Token& branch ) const;
 	bool scheduledSlotsFeedBranch( const std::vector<const VuScheduledIssueSlot*>& slots,
@@ -117,6 +119,9 @@ private:
 	bool writesAreDeadFromTarget( const std::list<std::string>& writes,
 	                              std::list<Token>::iterator target,
 	                              std::list<Token>::iterator end ) const;
+	bool writesAreDeadFromTargetOnEveryPath( const std::list<std::string>& writes,
+	                                         std::list<Token>& tokens,
+	                                         std::list<Token>::iterator target ) const;
 	bool emitsAsUpperMove( const Token& token ) const;
 	bool tokenIsLowerExecutionPath( const Token& token ) const;
 	bool tokenIsUpperExecutionPath( const Token& token ) const;

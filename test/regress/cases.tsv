@@ -1,0 +1,45 @@
+# name	kind	arg	bug	rationale
+# kind COUNT: arg is mnemonic:minimum - the emitted output must still contain at
+#             least that many.  This is what a deleted instruction looks like,
+#             and it is the check that would have caught the two most expensive
+#             bugs on the day they landed.
+# kind ORDER: p8-flagorder replays the CLIP shift register and the ACC chains and
+#             asserts every reader observes the writers the source gives it.
+# kind PATH:  pb-dag asserts the same, path-sensitively with bounded loop
+#             unrolling. Separate kind because the straight-line oracle cannot
+#             see a loop-carried or branch-conditional defect at all.
+# kind VALUE: pa-dag asserts the expression stored at each sq/isw is the one the
+#             source computes, register naming abstracted away.
+# kind XFAIL: known-unjudgeable - recorded so nobody re-derives why, never failed on.
+#
+clip_liveout	COUNT	clipw:3	CLIP shift register	a later clipw shifts the earlier one up an entry, it does not kill it; --drop-dead-writes deleted 4 of 7 per clip program and the "entirely inside" fast path stopped firing
+clip_reorder	ORDER	-	CLIP writer order	with the four clipw restored, nothing ordered two writers of one flag and the scheduler transposed them, putting the 0xF/0xA masks on the wrong judgements
+clip_liveout_order	ORDER	-	declared live-out	out_hw_clip was honoured by the dead-write pass and ignored by the scheduler's dead-resource mask, so it could permute clipw the pass had kept
+clip_second_reader	ORDER	-	reader flush	the dependency pass cleared its pending-writer list at a reader, so the SECOND reader of a chain got no edge and could be hoisted above its writers
+clip_full_window_not_landed	ORDER	-	full-window padding	padForClipFlagWindow exempted wide masks, so a fcand 0x3FFFF issued one row after its clipw and judged the PREVIOUS primitive
+acc_fields	COUNT	mula:2	ACC field mask	ACC is per field and the resource was one bit, so add.xy acc followed by add.z acc lost the first; this deleted the environment-map seed and env mapping stopped rendering
+acc_fields_covered	VALUE	-	ACC field mask (control)	a genuinely covering write must STILL kill - without this control the case above is satisfied by a compiler that stopped eliminating dead code at all
+acc_second_reader	ORDER	-	reader flush	the ACC half of the same flush bug
+acc_second_reader_upstream	ORDER	-	reader flush (upstream)	the same, reduced to fire on stock upstream openvcl with no flags
+r_rnext	COUNT	rnext:1	R is read-modify-write	RNEXT advances the LFSR then copies it out; declared a pure read, an rnext whose destination is dead was deleted and a step silently dropped
+r_rxor	COUNT	rxor:2	R is read-modify-write	RXOR folds a source field into the current R; declared a pure write, rinit and the first rxor were both deleted
+r_order	ORDER	-	R is read-modify-write	with neither declared a writer there is no edge at all between an rnext and a following rget, so the read is hoisted above the advance - fires on stock upstream
+status_sticky	ORDER	-	status not modelled	fsand was scheduled before the mul.x whose flags it reads, and --drop-dead-writes deleted that mul.x outright
+status_accumulate	ORDER	-	status accumulates	the sticky bits OR together until fsset clears them, so every contributor since the last clear must reach every reader
+status_fsset_barrier	ORDER	-	fsset is a barrier	declaring FSSET read-and-write makes it a hard barrier under the RAW/WAR tests that already exist, with no test needing to learn what a clear is
+status_lastwriter	ORDER	-	status non-sticky half	a mask naming a non-sticky bit pins the last contributor; one naming only sticky bits pins nothing
+status_lastwriter_hoist	ORDER	-	status non-sticky half	the hoist that the pinning above prevents
+lfc3	VALUE	-	loop-carried liveness	a value carried across a back edge kept a range ending at its last use inside the body; broken on stock upstream, fixed by --loop-liveness-always
+lfc4	VALUE	-	loop-carried liveness (control)	the same shape without a branch must be correct everywhere - if this ever fails the fix has broken the straight-line case
+# --- known-unjudgeable, recorded rather than asserted ---
+mac_latency	XFAIL	-	no MAC oracle	neither assembler preserves MAC-flag provenance: SCE inserts filler FMACs above an fmand and deletes dead ones, so there is no valid cross-assembler comparison. Zero MAC readers exist in the engine corpus
+efu_pair	XFAIL	-	EFU completion timing	Sony places NOP rows so an mfp lands between two eleng completions; judging that needs a cycle model, and guessing at one is the mistake this effort has already made twice
+fcset_hoist	XFAIL	-	SCE defect	Sony's vcl reorders CLIP readers around a SECOND fcset; openvcl is correct here. Not live - every engine source has exactly one fcset, at the top
+fcset_hoist2	XFAIL	-	SCE defect	the reduced form of the same
+lfc2	PATH	-	partial-write live-in	a loop-carried name whose first in-loop access is a PARTIAL write lost the fields that write did not cover, because live-in was classified per alias by first touch rather than per field
+delayslot_live	PATH	-	delay slot from the not-taken block	writesAreDeadFromTarget walked the token list LINEARLY from the branch target, so a backward branch re-entered rows it never visited; the filler then executed unconditionally
+loop_field_carry	PATH	-	partial-write live-in	second shape of lfc2
+delayslot_dead	PATH	-	delay slot (control)	the pointer IS re-initialised at the loop top, so the fill really is legal - if this ever fails the fix has become too conservative and is costing delay slots
+lfc5	PATH	-	partial-write live-in (control)	first in-loop access is a CONDITIONAL FULL write, already correct because the branch-state join merges the aliases; the fix must not touch it
+clip_pathgap_pz700396	ORDER	-	CLIP window across paths	the emitter padded against the file layout, so a reader four rows below its push was one row below it along a taken branch
+clip_pathgap_ok	ORDER	-	CLIP window across paths (control)	same labelled reader entered by a branch with no path that shortens it - must stay byte-identical, or the pass is padding blind
