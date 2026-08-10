@@ -781,13 +781,29 @@ bool Token::extractRegister( std::string name, Argument& argument, unsigned int 
 		}
 
 		// Support old-syntax component selection appended directly to aliases,
-		// e.g. "gif_tagx" or "xformed_vertw" → treat trailing xyzw as fields.
-		// Only allowed when not using new syntax and when fields are valid for this operand.
-		// IMPORTANT: To avoid breaking identifiers ending in common words like "index", "vertex",
-		// we check if the trailing xyzw are part of a common word suffix and skip stripping if so.
+		// e.g. "gif_tagx" or "xformed_vertw" -> treat trailing xyzw as fields.
+		//
+		// WHETHER A NAME CAN CARRY A FIELD IS A PROPERTY OF THE ARGUMENT, NOT OF THE
+		// SPELLING. Only an argument the operand pattern marks :dest, :bc or :flag
+		// takes one; the destination of an `iaddiu`, the value operand of an `isw`
+		// and a branch's condition never do. This used to strip first and then
+		// reject the WHOLE argument when no such modifier was present, so an
+		// integer alias whose name happened to end in x, y, z or w was
+		// "Invalid argument" - and the list of names that survived it was a
+		// hardcoded set of English trigrams ("dex", "tex", "lex", "rex", "sex"),
+		// which is how `next_index` compiled and `next_matrix` did not. Sony's vcl
+		// accepts both and reads neither as a field, so the trigrams were also a
+		// silent divergence in the other direction: a FLOAT alias called `vertex`
+		// is `verte` field x to Sony's vcl and a whole register here.
+		//
+		// Asking the modifier first answers both: an argument that cannot take a
+		// field keeps its name whole whatever it is spelled, and one that can is
+		// stripped whatever it is spelled - which is what the reference does.
 		if( alias.empty() )
 		{
-			if( !newSyntax && !indirect )
+			if( !newSyntax && !indirect
+			    && ( hasModifier( DEST, modifiers ) || hasModifier( BROADCAST, modifiers )
+			         || hasModifier( FLAG, modifiers ) ) )
 			{
 				// Find contiguous trailing xyzw characters
 				std::string::size_type end = name.size();
@@ -801,54 +817,16 @@ bool Token::extractRegister( std::string name, Argument& argument, unsigned int 
 						break;
 				}
 
-				if( pos < end )
+				// A name that is NOTHING but field letters is a field selection with
+				// no alias in front of it, which is not a register reference at all.
+				if( pos < end && pos > 0 )
 				{
-					// Check for common word endings that shouldn't be stripped:
-					// "dex" (index), "tex" (vertex), "plex" (complex), "rex" (regex)
-					// Allow stripping if:
-					// 1. Multiple xyzw chars (e.g., "xyz", "xyzw"), OR
-					// 2. Single xyzw after non-alphabetic char (e.g., "gif_tag11x"), OR
-					// 3. Single xyzw that doesn't form a common word suffix
-					bool shouldStrip = false;
-					if( (end - pos) >= 2 )
+					std::string fieldStr = name.substr( pos );
+					unsigned int parsedFields = 0;
+					if( extractFields( fieldStr, parsedFields ) )
 					{
-						// Multiple field chars - always strip
-						shouldStrip = true;
-					}
-					else if( pos > 0 && !isalpha(name[pos-1]) )
-					{
-						// Single field char after digit/underscore - likely field access
-						shouldStrip = true;
-					}
-					else if( pos >= 2 )
-					{
-						// Check if this forms a common word ending we should preserve
-						std::string ending = name.substr(pos-2, 3);
-						// Convert to lowercase for comparison
-						for(size_t i = 0; i < ending.length(); i++)
-							if(ending[i] >= 'A' && ending[i] <= 'Z')
-								ending[i] = ending[i] - 'A' + 'a';
-
-						if( ending != "dex" && ending != "tex" && ending != "lex" &&
-						    ending != "rex" && ending != "sex" )
-						{
-							shouldStrip = true;
-						}
-					}
-
-					if( shouldStrip )
-					{
-						std::string fieldStr = name.substr( pos );
-						unsigned int parsedFields = 0;
-						if( extractFields( fieldStr, parsedFields ) )
-						{
-							// Ensure this operand allows fields on the argument (dest/broadcast/flag)
-							if( !( hasModifier( DEST, modifiers ) || hasModifier( BROADCAST, modifiers ) || hasModifier( FLAG, modifiers ) ) )
-								return false;
-
-							fields |= parsedFields;
-							alias = name.substr( 0, pos );
-						}
+						fields |= parsedFields;
+						alias = name.substr( 0, pos );
 					}
 				}
 			}

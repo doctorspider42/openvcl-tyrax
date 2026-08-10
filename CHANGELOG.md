@@ -1,5 +1,49 @@
 ## Unreleased
 
+- `.syntax old` no longer decides whether a name is a field selection by its
+  spelling. The trailing `xyzw` of an alias was stripped before anything asked
+  whether the argument could carry a field at all, and the whole argument was then
+  rejected when it could not - so an integer alias whose name ended in x, y, z or
+  w was "Invalid argument", and the spellings that escaped that were a hardcoded
+  list of English trigrams (`dex`, `tex`, `lex`, `rex`, `sex`). `next_index`
+  compiled and `next_matrix` did not; Sony's `vcl` compiles both, identically, and
+  reads no field in either. The same list was a silent divergence in the other
+  direction: a FLOAT alias called `vertex` in a `:dest` position is `verte` field
+  `x` to Sony's `vcl` and was a whole quadword here, with no diagnostic on either
+  side. The modifier is now asked first and the strip is then unconditional, so an
+  argument that cannot take a field keeps its name whatever it is spelled and one
+  that can is stripped whatever it is spelled. A name that is nothing but field
+  letters is not a register reference and is left alone. `.syntax new` never
+  enters this code: the 70 real microprograms of a shipped engine and 1360
+  generated programs are byte-identical, and so are openvcl's own ps2gl fixtures.
+  `test/regress/src/old_alias_int.vcl`, `old_alias_field.vcl` and the control
+  `old_alias_int_ok.vcl`.
+- A loop-carried live range is no longer abandoned for the whole loop when a count
+  goes over. `extendLoopDirectiveRange` refused to extend anything when the
+  aliases OVERLAPPING a loop outnumbered the register file - and the set it
+  counted is not the set it extends. What gets extended is the read-first names
+  the body carries; what got counted also included every short-lived temporary in
+  the body, which is never extended and costs nothing. So the guard fired because
+  of the temporaries and then dropped the extension for the carried name, whose
+  register went to a temporary and whose value was gone by the second iteration.
+  Extending nothing is never the safe answer: when the extension genuinely does
+  not fit, refusing to allocate is, which is what already happened when the guard
+  was not taken. The extended set is now the read-first one unconditionally - the
+  narrowing `--loop-liveness-always` used to do alone - and the guard is gone.
+  Measured on a `--LoopCS` loop with thirty-four float temporaries and one carried
+  name: divergent from its own source under `pb-dag` and `pd-cond` with the guard,
+  clean without it, and it still allocates. The same loop with two temporaries
+  never reached the guard and was correct all along.
+  Reachable only in the default configuration: without a `--LoopCS` directive on
+  the branch target a back edge is not treated as a loop at all, and
+  `--loop-liveness-always` skips the guard. An instrumented build counted the
+  guard firing zero times across 1430 real and generated programs without the flag
+  and 387 times on the 70 with it, where it is disabled.
+  `test/regress/src/loop_pressure_carry.vcl` and its control.
+- `test/regress/cases.tsv` accepts `no:--the-flag` in the `arg` column, which
+  compiles that one case with the standard flag list minus that flag. A defect
+  that lives in a flag's OFF path cannot be asserted by a suite that only ever
+  compiles one configuration, and the two cases above are the first of those.
 - `--loop-liveness-always` terminates on every control-flow shape. The live-range
   extension runs once per BACK EDGE, and two back edges need not nest: each call
   picks the first alias of a name in ITS OWN range as the one the readers at the

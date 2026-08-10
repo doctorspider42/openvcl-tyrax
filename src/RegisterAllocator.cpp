@@ -1176,44 +1176,33 @@ void RegisterAllocator::extendLoopDirectiveRange( std::list<Token>& tokens, unsi
 	// stays carried, and the field walk only adds to it.
 	for( std::set<Alias*>::iterator i = liveInAliases.begin(); i != liveInAliases.end(); ++i )
 		carriedAliases.insert( *i );
-	if( vuLoopLivenessAlwaysEnabled() )
-		aliases = liveInAliases;
-
-	unsigned int availableFloats = 0;
-	unsigned int availableInts = 0;
-	for( unsigned int i = 0; i < 32; ++i )
-	{
-		if( m_floats[i].available() )
-			++availableFloats;
-	}
-	for( unsigned int i = 0; i < 16; ++i )
-	{
-		if( m_integers[i].available() )
-			++availableInts;
-	}
-
-	std::set<Alias*> overlappingFloats;
-	std::set<Alias*> overlappingInts;
-	for( AliasMap::iterator i = m_aliases.begin(); i != m_aliases.end(); ++i )
-	{
-		Alias* alias = i->first;
-		if( aliases.find( alias ) == aliases.end()
-		    && !alias->hasRangeOverlapping( loopStart, loopEnd ) )
-			continue;
-		if( alias->type() == Alias::FLOAT )
-			overlappingFloats.insert( alias );
-		else
-			overlappingInts.insert( alias );
-	}
-
-	// Skipping the extension is not a licence to emit wrong code: a value live
-	// across the back edge whose range was not extended gets its register handed
-	// to another name. --loop-liveness-always keeps the extension and lets
-	// allocation fail loudly instead.
-	if( !vuLoopLivenessAlwaysEnabled()
-	    && ( overlappingFloats.size() > availableFloats
-	         || overlappingInts.size() > availableInts ) )
-		return;
+	// ONLY THE READ-FIRST NAMES ARE LIVE ACROSS THE BACK EDGE. A name written
+	// before it is read inside the body is a temporary whose own range already
+	// covers it, and stretching those over the whole loop is what used to run the
+	// allocator out of registers. That narrowing was --loop-liveness-always's
+	// alone; the default path kept the wider set and an early return below to
+	// catch the overflow the wider set caused.
+	//
+	// SKIPPING THE EXTENSION IS NOT A LICENCE TO EMIT WRONG CODE, and that early
+	// return did exactly that. It compared the number of aliases with a range
+	// OVERLAPPING the loop against the register file - a set it does not extend:
+	// what gets addRange() below is this read-first set, while the count included
+	// every short-lived temporary in the body. So it fired on loops whose
+	// extension was free, and when it fired it dropped the extension for the
+	// carried names that needed it. A value written at the bottom of the body and
+	// read at the top then had its register handed to a temporary, and every
+	// iteration after the first read what the temporary left.
+	//
+	// Measured, on a `--LoopCS` loop with 41 float aliases overlapping it and one
+	// carried name: with the early return the emitted program diverges from its
+	// own source under both pb-dag and pd-cond; without it the same program is
+	// clean AND still allocates. The same loop with two fewer temporaries never
+	// reached the guard and was correct all along. See the regression cases
+	// loop_pressure_carry and loop_pressure_carry_ok.
+	//
+	// When the extension genuinely does not fit, failing loudly is the only honest
+	// answer - which is what --loop-liveness-always has always done here.
+	aliases = liveInAliases;
 
 	for( std::set<Alias*>::iterator a = aliases.begin(); a != aliases.end(); ++a )
 		(*a)->addRange( loopStart, loopEnd );

@@ -54,6 +54,16 @@ on another during development — rows of two `nop`s not counted, `move` lowered
 sums, a stall annotation charged to the wrong side of its row. Every one of those
 would have been reported as "Sony's compiler is broken".
 
+**A case may need a different configuration, and one form says so.** Most
+defects here are visible with the twenty-one flags the TyraX toolchain passes,
+because that is the build it ships. Some live in a flag's OFF path - the default
+one, which is what a plain `ps2dev/openvcl` checkout does - and a suite that
+only ever compiles one configuration cannot assert those at all. A case whose
+`arg` reads `no:--the-flag` is compiled with the standard list minus that one
+flag, so a failure still names one thing rather than a configuration.
+`loop_pressure_carry` is the first: with `--loop-liveness-always` on it was
+correct all along, and the guard it is about is skipped.
+
 **A case needs its control.** `acc_fields` asserts a non-covering ACC write is
 kept; `acc_fields_covered` asserts a genuinely covering one still kills. Without
 the second, the first is satisfied by a compiler that has stopped eliminating

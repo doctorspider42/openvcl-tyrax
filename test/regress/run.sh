@@ -75,7 +75,26 @@ for name in "${order[@]}"; do
     cp "$src" "$OUT/src/"
     tmo="$DEFAULT_TMO"
     [ "${KIND[$name]}" = "TIME" ] && tmo="${ARG[$name]}"
-    timeout "$tmo" "$OPENVCL" "${FLAGS[@]}" "$src" > "$OUT/vsm/$name.vsm" 2>"$OUT/$name.err"
+    # A case may ask for the list MINUS one flag, with arg `no:--the-flag`.
+    # Some defects live only in a flag's OFF path - the one the twenty-one hide -
+    # and a suite that can only compile one configuration cannot assert those at
+    # all. Dropping exactly one flag keeps the rest of the configuration this
+    # file exercises, so a case that fails still names one thing.
+    caseFlags=("${FLAGS[@]}")
+    case "${ARG[$name]}" in
+    no:*)
+        drop="${ARG[$name]#no:}"
+        caseFlags=()
+        for f in "${FLAGS[@]}"; do
+            [ "$f" = "$drop" ] || caseFlags+=("$f")
+        done
+        if [ "${#caseFlags[@]}" -eq "${#FLAGS[@]}" ]; then
+            echo "  FAIL  $name - arg says drop $drop, which is not in the flag list"
+            fail=$((fail+1)); failed="$failed $name"; continue
+        fi
+        ;;
+    esac
+    timeout "$tmo" "$OPENVCL" "${caseFlags[@]}" "$src" > "$OUT/vsm/$name.vsm" 2>"$OUT/$name.err"
     RC["$name"]=$?
     # 124 is GNU coreutils' "still running", 143 the shell's view of the SIGTERM
     # that killed it, 15 busybox's. Anything else is a compiler that answered.
