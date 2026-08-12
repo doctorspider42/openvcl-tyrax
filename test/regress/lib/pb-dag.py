@@ -110,8 +110,15 @@ QSCALE = float(os.environ.get("PB_QLAT_SCALE", 1.0))
 # run of this oracle "found" a miscompile in 38 of the 70 real programs.
 HW_MARGIN = int(os.environ.get("PB_HW_MARGIN", 0))
 
+# The trailing `[*/+-]` is what lets an immediate be an EXPRESSION rather than a
+# bag of numbers.  Without it `*`, `/` and a standalone sign matched no
+# alternative at all and were silently dropped, and `imm_at` summed whatever
+# survived - the right answer for the `4 + 36` this engine writes and a
+# meaningless one for ps2gl's `((1024 - (...)) * 3 / 17)`.  It stays LAST so the
+# signed-number alternatives still win: `-36` is one token, `- 36` is two.
 TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*(?:\.[a-zA-Z]+)?|0[xX][0-9a-fA-F]+"
-                   r"|[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+|[,()\[\]]|\+\+")
+                   r"|[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+|[,()\[\]]|\+\+"
+                   r"|[*/+-]")
 STALL = re.compile(r"STALL_[A-Z_]*\s*\?(\d+)")
 BITMARK = re.compile(r"\[[EDTI]\]")
 
@@ -378,19 +385,17 @@ class Parser(object):
                 if names:
                     ops.append(("(base)", names[0], "++" in inner))
                 else:
-                    # NOT evaluated, and that is a known limit rather than an
-                    # oversight: TOKEN does not emit `*`, `/` or a standalone `-`
-                    # at all, so by the time the tokens arrive here the operators
-                    # are already gone and `imm_at` simply SUMS what is left.  That
-                    # is exactly right for the `4 + 36` the engine's own sources
-                    # write and cannot read ps2gl's
-                    # `((1024 - (...)) * 3 / 17)`.  Reading those needs operators to
-                    # become tokens and imm_at/address to evaluate an expression
-                    # instead of summing - and both assemblers were measured to use
-                    # C truncation toward zero (7/2=3, -7/2=-3), so whoever does it
-                    # has the semantics.  Until then the group carries no name
-                    # rather than a phantom register called "0".
-                    ops.append(("(base)", None, "++" in inner))
+                    # An integer expression, evaluated: the operators are tokens
+                    # now, so the whole group - nested brackets included - arrives
+                    # here intact.  ps2gl's C macros emit nothing else, and reading
+                    # one as a memory base is what made twelve of its fixtures look
+                    # miscompiled.  A group that does not evaluate keeps the old
+                    # meaning rather than a guess.
+                    value = eval_int_expr(inner)
+                    if value is None:
+                        ops.append(("(base)", None, "++" in inner))
+                    else:
+                        ops.append((str(value), None, False))
                 i = j + 1
                 continue
             if t == "[":
@@ -446,6 +451,111 @@ def parse_int(t):
         return None
 
 
+OPERATORS = ("+", "-", "*", "/", "(", ")")
+
+
+def is_expr_token(tok):
+    return parse_int(tok) is not None or tok in OPERATORS
+
+
+def eval_int_expr(tokens):
+    """Evaluate `+ - * / ( )` over integers exactly as both assemblers do.
+
+    The division semantics were MEASURED rather than assumed.  A four-line program
+    through `vcl` and through `openvcl` gives, identically:
+
+        7 / 2 = 3        -7 / 2 = -3        (1024 - 1075) * 3 / 17 = -9
+
+    which is C truncation toward zero.  Python's `//` floors and would answer -4
+    and -10 here, and `int(a / b)` truncates but goes through a float and stops
+    being exact on large values, so neither is used.
+
+    Returns None for anything not fully understood, and every caller treats None as
+    "leave it alone".  A guessed immediate is worse than an unread one: it produces
+    a wrong address that pairs with nothing, which is how twelve ps2gl fixtures came
+    to look miscompiled.
+    """
+    pos = [0]
+
+    def peek():
+        return tokens[pos[0]] if pos[0] < len(tokens) else None
+
+    def take():
+        tok = peek()
+        pos[0] += 1
+        return tok
+
+    def primary():
+        tok = take()
+        if tok == "(":
+            v = expr()
+            if take() != ")":
+                raise ValueError
+            return v
+        if tok in ("-", "+"):
+            v = primary()
+            return -v if tok == "-" else v
+        v = parse_int(tok)
+        if v is None:
+            raise ValueError
+        return v
+
+    def term():
+        v = primary()
+        while peek() in ("*", "/"):
+            op = take()
+            r = primary()
+            if op == "*":
+                v *= r
+            else:
+                if r == 0:
+                    raise ValueError
+                q = abs(v) // abs(r)
+                v = -q if (v < 0) != (r < 0) else q
+        return v
+
+    def expr():
+        v = term()
+        while True:
+            nxt = peek()
+            if nxt in ("+", "-"):
+                op = take()
+                v = v + term() if op == "+" else v - term()
+                continue
+            # A SIGNED NUMBER token is an implicit addition.  `956+0` has no space,
+            # so the signed-number alternative in TOKEN wins and it arrives as
+            # `956` then `+0` - which is the exact form the summing code this
+            # replaces was built for, and half the engine's offsets are written
+            # that way.  `956 + 0` with spaces arrives as three tokens and is
+            # handled by the branch above; both must mean 956.
+            if (isinstance(nxt, str) and nxt[:1] in ("+", "-")
+                    and parse_int(nxt) is not None):
+                v += parse_int(take())
+                continue
+            break
+        return v
+
+    try:
+        v = expr()
+    except (ValueError, IndexError, TypeError):
+        return None
+    return v if pos[0] == len(tokens) else None
+
+
+def eval_longest(tokens):
+    """Evaluate the longest prefix of `tokens` that is a complete expression.
+
+    A gathered run can end on an operator - `4 +` when the operand after it is a
+    register - and an expression that does not parse must not take the whole
+    immediate down with it.
+    """
+    for end in range(len(tokens), 0, -1):
+        v = eval_int_expr(tokens[:end])
+        if v is not None:
+            return v
+    return None
+
+
 def imm_at(ops, k):
     """The immediate at operand k, as a SUM of the tokens that make it up.
 
@@ -458,17 +568,14 @@ def imm_at(ops, k):
     """
     if k >= len(ops):
         return None
-    v = parse_int(ops[k][0])
-    if v is None:
-        return None
-    j = k + 1
-    while j < len(ops):
-        w = parse_int(ops[j][0])
-        if w is None:
-            break
-        v += w
+    run = []
+    j = k
+    while j < len(ops) and is_expr_token(ops[j][0]):
+        run.append(ops[j][0])
         j += 1
-    return v
+    if not run:
+        return None
+    return eval_longest(run)
 
 
 BINOP = {"add": "ADD", "sub": "SUB", "mul": "MUL", "max": "MAX", "mini": "MINI",
@@ -726,14 +833,26 @@ def address(m, ops):
     for k, (name, sel, inc) in enumerate(ops):
         if name != "(base)":
             continue
-        off = 0
+        # Gathered BACKWARDS from the bracket and then evaluated, for the same
+        # reason imm_at evaluates: the offset is an expression.  Summing tokens
+        # read `1+4(destAddress)` correctly and `(a - b)(...)` not at all.
+        run = []
         j = k - 1
-        while j >= 0:
-            v = parse_int(ops[j][0])
-            if v is None:
-                break
-            off += v
+        while j >= 0 and is_expr_token(ops[j][0]):
+            run.append(ops[j][0])
             j -= 1
+        run.reverse()
+        off = 0
+        if run:
+            v = eval_longest(run)
+            if v is None:
+                # Drop leading tokens until what is left parses: a run can start
+                # on a dangling operator when a register name precedes it.
+                for start in range(1, len(run)):
+                    v = eval_longest(run[start:])
+                    if v is not None:
+                        break
+            off = v or 0
         if sel is None:
             return N("addr", ZERO, off)
         root, kb = split_off(m.ivalue(sel))
