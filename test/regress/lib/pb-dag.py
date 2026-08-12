@@ -351,13 +351,46 @@ class Parser(object):
                 i += 1
                 continue
             if t == "(":
-                j = i + 1
-                inner = []
-                while j < len(piece) and piece[j] != ")":
+                # A parenthesis is NOT always a memory base.  ps2gl's fixtures come
+                # out of C macros and write immediates as arithmetic:
+                # `iaddiu next_output, vi00, ((0 + (((0) + 1) + 6)) + 1)`.  Read as a
+                # base operand, that made the destination register's value depend on a
+                # load from a register named "0", so every address computed from it
+                # stayed symbolic while the compiler had folded it to a literal - and
+                # all 66 observables of a program reported as unpaired at once.  The
+                # engine's own sources never trip it because they only ever put a
+                # register inside the brackets (`956+0(vi00)`).
+                #
+                # Scan BALANCED, too: the old loop stopped at the first `)`, which
+                # cannot find the end of a nested group.
+                j, depth, inner = i + 1, 1, []
+                while j < len(piece):
+                    if piece[j] == "(":
+                        depth += 1
+                    elif piece[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
                     inner.append(piece[j])
                     j += 1
-                names = [x for x in inner if x != "++"]
-                ops.append(("(base)", names[0] if names else None, "++" in inner))
+                names = [x for x in inner
+                         if x not in ("++", "--") and re.match(r"[A-Za-z_]", x)]
+                if names:
+                    ops.append(("(base)", names[0], "++" in inner))
+                else:
+                    # NOT evaluated, and that is a known limit rather than an
+                    # oversight: TOKEN does not emit `*`, `/` or a standalone `-`
+                    # at all, so by the time the tokens arrive here the operators
+                    # are already gone and `imm_at` simply SUMS what is left.  That
+                    # is exactly right for the `4 + 36` the engine's own sources
+                    # write and cannot read ps2gl's
+                    # `((1024 - (...)) * 3 / 17)`.  Reading those needs operators to
+                    # become tokens and imm_at/address to evaluate an expression
+                    # instead of summing - and both assemblers were measured to use
+                    # C truncation toward zero (7/2=3, -7/2=-3), so whoever does it
+                    # has the semantics.  Until then the group carries no name
+                    # rather than a phantom register called "0".
+                    ops.append(("(base)", None, "++" in inner))
                 i = j + 1
                 continue
             if t == "[":
