@@ -2351,6 +2351,17 @@ void Parser::tryUnsunkArm()
 	// decision rather than a diagnosis - the same bargain the --sink-loads-past-branches
 	// retry above makes.  Anything wrong with the INPUT was already reported by the
 	// first arm, which ran unsuppressed and succeeded.
+	//
+	// SAVED AND RESTORED, not switched off at the end.  The two ladders in
+	// allocateRegisters()/allocateRegistersAttempt() already do it that way, and
+	// this one did not: it drove suppression to false unconditionally.  That is
+	// harmless only because generateCode() is a different parser state from
+	// allocateRegisters(), so this arm cannot run inside theirs today - exactly
+	// the "latent, not reachable" shape as the unbounded alias walk in
+	// RegisterAllocator.  A future caller that runs a speculative arm around
+	// code generation would have its suppression silently dropped here, and the
+	// errors it is entitled to swallow would fail the build instead.
+	const bool suppressedOnEntry = Error::Suppressed();
 	Error::SetSuppressed( true );
 
 	bool built = true;
@@ -2376,7 +2387,7 @@ void Parser::tryUnsunkArm()
 			built = generateCodeInto( generator, allocator.name(), tokenizer.tokens() );
 	}
 
-	Error::SetSuppressed( false );
+	Error::SetSuppressed( suppressedOnEntry );
 
 	setVuSinkLoadsEnabled( sink );
 	setVuSinkLoadsAcrossStoresEnabled( sinkAcrossStores );
