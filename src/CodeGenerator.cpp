@@ -1461,6 +1461,10 @@ bool CodeGenerator::beginProcess(const std::list<Token>& tokens)
 	// distance to a CLIP reader is not in the emitter's hands until the row it
 	// jumps to has been emitted.
 	padClipFlagWindowAcrossPaths();
+	// And after it, for the same reason and on the same graph: a branch entered
+	// through a label is one row from a producer sitting in the delay slot of the
+	// jump that got there, and nothing before this point has looked.
+	padBranchConditionAcrossPaths();
 
 	if( m_name.length() > 0 )
 	{
@@ -1790,6 +1794,177 @@ namespace
 			name[i] = (char)tolower( (unsigned char)name[i] );
 		return name;
 	}
+
+	enum { BR_NONE = 0, BR_COND, BR_UNCOND, BR_INDIRECT };
+
+	bool isIntegerRegisterToken( const std::string& token )
+	{
+		if( token.size() < 3 || token.compare( 0, 2, "vi" ) != 0 )
+			return false;
+		for( std::string::size_type i = 2; i < token.size(); ++i )
+		{
+			if( !isdigit( (unsigned char)token[i] ) )
+				return false;
+		}
+		return token != "vi00";
+	}
+
+	// The condition registers of the conditional branch on this row, taken by
+	// OPERAND COUNT rather than "every VIxx after the mnemonic": ibeq/ibne test
+	// two, the four sign tests one, and the token after those is the label.
+	void branchConditionRegisters( const std::vector<std::string>& tokens,
+	                               const VuInstructionOpcode* conditional,
+	                               unsigned int conditionalCount,
+	                               std::list<std::string>& out )
+	{
+		for( unsigned int t = 0; t < tokens.size(); ++t )
+		{
+			for( unsigned int k = 0; k < conditionalCount; ++k )
+			{
+				if( tokens[t] != vuInstr( conditional[k] ) )
+					continue;
+				const bool twoOperands = conditional[k] == VU_OP_IBEQ
+				                      || conditional[k] == VU_OP_IBNE;
+				const unsigned int want = twoOperands ? 2u : 1u;
+				unsigned int taken = 0;
+				for( unsigned int u = t + 1; u < tokens.size() && taken < want; ++u )
+				{
+					if( tokens[u].size() >= 3 && tokens[u].compare( 0, 2, "vi" ) == 0 )
+					{
+						++taken;
+						if( isIntegerRegisterToken( tokens[u] ) )
+							out.push_back( tokens[u] );
+					}
+				}
+			}
+		}
+	}
+
+	// Does this row write `reg` with an integer ARITHMETIC op? The destination of
+	// every opcode in `arith` is its first operand, so it is the token right after
+	// the mnemonic.
+	bool rowWritesIntegerRegister( const std::vector<std::string>& tokens,
+	                               const VuInstructionOpcode* arith,
+	                               unsigned int arithCount,
+	                               const std::string& reg )
+	{
+		for( unsigned int t = 0; t + 1 < tokens.size(); ++t )
+		{
+			for( unsigned int k = 0; k < arithCount; ++k )
+			{
+				if( tokens[t] == vuInstr( arith[k] ) && tokens[t + 1] == reg )
+					return true;
+			}
+		}
+		return false;
+	}
+
+	// The emitted program as a control-flow graph over its instruction ROWS.
+	// Shared by the two cross-path padding passes below, because both need the
+	// same graph and the same rule about where a branch fans out - and a second
+	// copy of that rule is a second place for it to be wrong.
+	struct EmittedRowGraph
+	{
+		std::vector< std::list<std::string>::iterator > rowIt;
+		std::vector< std::vector<std::string> > rowTokens;
+		std::vector<int> branchKind;
+		std::vector<unsigned int> branchTarget;
+		std::vector< std::vector<unsigned int> > successors;
+		std::vector<char> labelled;
+		unsigned int rowCount;
+	};
+
+	void buildEmittedRowGraph( std::list<std::string>& codeLines, EmittedRowGraph& g )
+	{
+		std::map<std::string, unsigned int> labels;
+		for( std::list<std::string>::iterator i = codeLines.begin(); i != codeLines.end(); ++i )
+		{
+			const EmittedLineKind kind = classifyEmittedLine( *i );
+			if( kind == EMITTED_NOTHING )
+				continue;
+			if( kind == EMITTED_LABEL )
+			{
+				const std::string name = emittedLabelName( *i );
+				if( !name.empty() && labels.find( name ) == labels.end() )
+					labels[name] = (unsigned int)g.rowIt.size();
+				continue;
+			}
+			std::vector<std::string> tokens;
+			emittedRowTokens( *i, tokens );
+			g.rowIt.push_back( i );
+			g.rowTokens.push_back( tokens );
+		}
+
+		g.rowCount = (unsigned int)g.rowIt.size();
+		g.branchKind.assign( g.rowCount, BR_NONE );
+		g.branchTarget.assign( g.rowCount, g.rowCount );
+		g.successors.assign( g.rowCount, std::vector<unsigned int>() );
+		g.labelled.assign( g.rowCount, 0 );
+		if( g.rowCount == 0 )
+			return;
+
+		const VuInstructionOpcode conditional[6] = { VU_OP_IBEQ, VU_OP_IBGEZ, VU_OP_IBGTZ,
+		                                             VU_OP_IBLEZ, VU_OP_IBLTZ, VU_OP_IBNE };
+		for( unsigned int i = 0; i < g.rowCount; ++i )
+		{
+			const std::vector<std::string>& tokens = g.rowTokens[i];
+			if( rowHas( tokens, vuInstr( VU_OP_JR ) ) || rowHas( tokens, vuInstr( VU_OP_JALR ) ) )
+				g.branchKind[i] = BR_INDIRECT;
+			else if( rowHas( tokens, vuInstr( VU_OP_B ) ) || rowHas( tokens, vuInstr( VU_OP_BAL ) ) )
+				g.branchKind[i] = BR_UNCOND;
+			else
+			{
+				for( int k = 0; k < 6; ++k )
+				{
+					if( rowHas( tokens, vuInstr( conditional[k] ) ) )
+					{
+						g.branchKind[i] = BR_COND;
+						break;
+					}
+				}
+			}
+			if( g.branchKind[i] == BR_COND || g.branchKind[i] == BR_UNCOND )
+			{
+				// The target is the last token on the row that names a label.
+				for( unsigned int t = (unsigned int)tokens.size(); t > 0; --t )
+				{
+					std::map<std::string, unsigned int>::const_iterator found =
+						labels.find( tokens[t - 1] );
+					if( found != labels.end() )
+					{
+						g.branchTarget[i] = found->second;
+						break;
+					}
+				}
+			}
+		}
+
+		// A delay slot executes whichever way its branch goes, so the row after a
+		// branch fans out, not the branch row itself.
+		for( unsigned int i = 0; i < g.rowCount; ++i )
+		{
+			if( g.branchKind[i] == BR_NONE )
+			{
+				if( i + 1 < g.rowCount )
+					g.successors[i].push_back( i + 1 );
+				continue;
+			}
+			if( g.branchKind[i] == BR_INDIRECT || i + 1 >= g.rowCount )
+				continue;
+			g.successors[i].push_back( i + 1 );
+			const unsigned int slot = i + 1;
+			if( g.branchTarget[i] < g.rowCount )
+				g.successors[slot].push_back( g.branchTarget[i] );
+			if( g.branchKind[i] == BR_COND && slot + 1 < g.rowCount )
+				g.successors[slot].push_back( slot + 1 );
+		}
+
+		for( std::map<std::string, unsigned int>::const_iterator i = labels.begin(); i != labels.end(); ++i )
+		{
+			if( i->second < g.rowCount )
+				g.labelled[i->second] = 1;
+		}
+	}
 }
 
 // The CLIP window is a distance along a PATH, and the emitter measures a file.
@@ -1834,39 +2009,21 @@ void CodeGenerator::padClipFlagWindowAcrossPaths()
 
 bool CodeGenerator::insertOneCrossPathClipPad( unsigned int latency )
 {
-	std::vector< std::list<std::string>::iterator > rowIt;
-	std::vector< std::vector<std::string> > rowTokens;
-	std::map<std::string, unsigned int> labels;
-	for( std::list<std::string>::iterator i = m_codeLines.begin(); i != m_codeLines.end(); ++i )
-	{
-		const EmittedLineKind kind = classifyEmittedLine( *i );
-		if( kind == EMITTED_NOTHING )
-			continue;
-		if( kind == EMITTED_LABEL )
-		{
-			const std::string name = emittedLabelName( *i );
-			if( !name.empty() && labels.find( name ) == labels.end() )
-				labels[name] = (unsigned int)rowIt.size();
-			continue;
-		}
-		std::vector<std::string> tokens;
-		emittedRowTokens( *i, tokens );
-		rowIt.push_back( i );
-		rowTokens.push_back( tokens );
-	}
-
-	const unsigned int rowCount = (unsigned int)rowIt.size();
+	EmittedRowGraph g;
+	buildEmittedRowGraph( m_codeLines, g );
+	const unsigned int rowCount = g.rowCount;
 	if( rowCount == 0 )
 		return false;
 
-	enum { BR_NONE = 0, BR_COND, BR_UNCOND, BR_INDIRECT };
-	const VuInstructionOpcode conditional[6] = { VU_OP_IBEQ, VU_OP_IBGEZ, VU_OP_IBGTZ,
-	                                             VU_OP_IBLEZ, VU_OP_IBLTZ, VU_OP_IBNE };
+	const std::vector< std::list<std::string>::iterator >& rowIt = g.rowIt;
+	const std::vector< std::vector<std::string> >& rowTokens = g.rowTokens;
+	const std::vector<int>& branchKind = g.branchKind;
+	const std::vector< std::vector<unsigned int> >& successors = g.successors;
+	const std::vector<char>& labelled = g.labelled;
+
 	const VuInstructionOpcode pushes[3] = { VU_OP_CLIP, VU_OP_CLIPW, VU_OP_CLIPLW };
 	const VuInstructionOpcode readers[4] = { VU_OP_FCAND, VU_OP_FCOR, VU_OP_FCEQ, VU_OP_FCGET };
 
-	std::vector<int> branchKind( rowCount, BR_NONE );
-	std::vector<unsigned int> branchTarget( rowCount, rowCount );
 	std::vector<char> isPush( rowCount, 0 );
 	std::vector<char> isReader( rowCount, 0 );
 	for( unsigned int i = 0; i < rowCount; ++i )
@@ -1882,56 +2039,6 @@ bool CodeGenerator::insertOneCrossPathClipPad( unsigned int latency )
 			if( rowHas( tokens, vuInstr( readers[k] ) ) )
 				isReader[i] = 1;
 		}
-		if( rowHas( tokens, vuInstr( VU_OP_JR ) ) || rowHas( tokens, vuInstr( VU_OP_JALR ) ) )
-			branchKind[i] = BR_INDIRECT;
-		else if( rowHas( tokens, vuInstr( VU_OP_B ) ) || rowHas( tokens, vuInstr( VU_OP_BAL ) ) )
-			branchKind[i] = BR_UNCOND;
-		else
-		{
-			for( int k = 0; k < 6; ++k )
-			{
-				if( rowHas( tokens, vuInstr( conditional[k] ) ) )
-				{
-					branchKind[i] = BR_COND;
-					break;
-				}
-			}
-		}
-		if( branchKind[i] == BR_COND || branchKind[i] == BR_UNCOND )
-		{
-			// The target is the last token on the row that names a label.
-			for( unsigned int t = (unsigned int)tokens.size(); t > 0; --t )
-			{
-				std::map<std::string, unsigned int>::const_iterator found =
-					labels.find( tokens[t - 1] );
-				if( found != labels.end() )
-				{
-					branchTarget[i] = found->second;
-					break;
-				}
-			}
-		}
-	}
-
-	// A delay slot executes whichever way its branch goes, so the row after a
-	// branch fans out, not the branch row itself.
-	std::vector< std::vector<unsigned int> > successors( rowCount );
-	for( unsigned int i = 0; i < rowCount; ++i )
-	{
-		if( branchKind[i] == BR_NONE )
-		{
-			if( i + 1 < rowCount )
-				successors[i].push_back( i + 1 );
-			continue;
-		}
-		if( branchKind[i] == BR_INDIRECT || i + 1 >= rowCount )
-			continue;
-		successors[i].push_back( i + 1 );
-		const unsigned int slot = i + 1;
-		if( branchTarget[i] < rowCount )
-			successors[slot].push_back( branchTarget[i] );
-		if( branchKind[i] == BR_COND && slot + 1 < rowCount )
-			successors[slot].push_back( slot + 1 );
 	}
 
 	// distance[i] = fewest rows executed strictly between a push and row i.
@@ -1969,15 +2076,8 @@ bool CodeGenerator::insertOneCrossPathClipPad( unsigned int latency )
 		}
 	}
 
-	// Where a label sits, so the backward walk below can stop at it exactly where
-	// emittedRowsSinceClipWrite() does.
-	std::vector<char> labelled( rowCount, 0 );
-	for( std::map<std::string, unsigned int>::const_iterator i = labels.begin(); i != labels.end(); ++i )
-	{
-		if( i->second < rowCount )
-			labelled[i->second] = 1;
-	}
-
+	// `labelled` comes from the shared graph: the backward walk below stops at a
+	// label exactly where emittedRowsSinceClipWrite() does.
 	for( unsigned int i = 0; i < rowCount; ++i )
 	{
 		if( !isReader[i] || isPush[i] )
@@ -2018,6 +2118,126 @@ bool CodeGenerator::insertOneCrossPathClipPad( unsigned int latency )
 		const unsigned int pad = latency - 1 - distance[i];
 		for( unsigned int p = 0; p < pad; ++p )
 			m_codeLines.insert( rowIt[i], formatRawPairedInstructionLine( vuInstr(VU_OP_NOP), vuInstr(VU_OP_NOP) ) );
+		return true;
+	}
+	return false;
+}
+
+// A BRANCH CONDITION IS A DISTANCE ALONG A PATH TOO, AND THIS ONE WAS LEFT IN
+// FILE ORDER.
+//
+// The emitter's baseline rule is one bubble row in front of every conditional
+// branch. --branch-bubble-on-dependency narrows that to branches whose condition
+// is actually produced nearby, and asks the question with
+// scheduledSlotsFeedBranch(), which looks at the one or two SCHEDULE SLOTS above
+// the branch. For a branch in the middle of a block those are its only
+// predecessors and the answer is right. For a branch that is the FIRST ROW OF A
+// LABELLED BLOCK it is not: that row has another predecessor, the DELAY SLOT of
+// every branch that jumps to the label, and a delay slot is exactly where
+// --emit-delay-fillers likes to put an integer op. The file then shows the
+// producer five rows above the label and the hardware executes it one row above
+// the branch.
+//
+// That is live in the engine. main's #218 clip programs walk the frustum planes
+// with the per-package mask in an integer register:
+//
+//     planeLoop:
+//         ibltz   buffer, planeActive     <- first row of the block
+//     ...
+//     planeAdvance:
+//         ibne    planePtr, vertMask, planeLoop
+//         iadd    buffer, buffer, buffer  <- delay slot: shifts the mask
+//
+// so every iteration after the first tested the PREVIOUS plane's bit, and the
+// clipper applied the wrong subset of the frustum planes - visible on hardware
+// as unclipped geometry that changes with the camera, and invisible in PCSX2,
+// whose VU has no such hazard. Five programs carried it: all five stapip_clip_*.
+// Sony's vcl emits the same delay-slot fill and then pads the loop head, which is
+// what this pass now does.
+//
+// WHAT IS NOT CLAIMED. This does not decide a latency. It restores the emitter's
+// own invariant - one row between a dependent integer producer and the branch
+// reading it - along paths as well as down the page, and the interlocked
+// producers --branch-interlock exempts (loads, CLIP and MAC/STATUS readers) stay
+// exempt here, because Sony puts those in the row directly above a branch on
+// purpose and annotates the stall it leaves to the hardware.
+//
+// ORDER. This runs after padClipFlagWindowAcrossPaths(). Inserting rows can only
+// LENGTHEN a CLIP push-to-reader distance, never shorten one, so no clip
+// judgement already made can be invalidated by a pad added here.
+void CodeGenerator::padBranchConditionAcrossPaths()
+{
+	if( !vuBranchBubbleOnDependencyEnabled() )
+		return;      // the unconditional bubble is already in front of every branch
+	for( unsigned int guard = 0; guard < 4096; ++guard )
+	{
+		if( !insertOneCrossPathBranchBubble() )
+			return;
+	}
+}
+
+bool CodeGenerator::insertOneCrossPathBranchBubble()
+{
+	EmittedRowGraph g;
+	buildEmittedRowGraph( m_codeLines, g );
+	if( g.rowCount == 0 )
+		return false;
+
+	// Integer ARITHMETIC writers only. The destination of each of these is the
+	// token immediately after the mnemonic in the emitted row, which is what makes
+	// this answerable from the emitted text at all. Loads and flag readers are
+	// deliberately absent: --branch-interlock leaves those to the hardware.
+	static const VuInstructionOpcode arith[10] = {
+		VU_OP_IADD, VU_OP_IADDI, VU_OP_IADDIU, VU_OP_ISUB, VU_OP_ISUBIU,
+		VU_OP_IAND, VU_OP_IOR, VU_OP_MFIR, VU_OP_XTOP, VU_OP_XITOP };
+	const VuInstructionOpcode conditional[6] = { VU_OP_IBEQ, VU_OP_IBGEZ, VU_OP_IBGTZ,
+	                                             VU_OP_IBLEZ, VU_OP_IBLTZ, VU_OP_IBNE };
+
+	for( unsigned int i = 0; i < g.rowCount; ++i )
+	{
+		if( g.branchKind[i] != BR_COND )
+			continue;
+		// Only a branch entered through a label can have a predecessor the
+		// schedule-order test could not see. Everywhere else
+		// scheduledSlotsFeedBranch() already decided, and this pass does not
+		// re-open a decision that was taken with full information.
+		if( !g.labelled[i] )
+			continue;
+		// A delay slot cannot be pushed away from the branch it belongs to.
+		if( i > 0 && ( g.branchKind[i - 1] == BR_COND || g.branchKind[i - 1] == BR_UNCOND ) )
+			continue;
+
+		std::list<std::string> reads;
+		branchConditionRegisters( g.rowTokens[i], conditional, 6, reads );
+		if( reads.empty() )
+			continue;
+
+		bool needsPad = false;
+		for( unsigned int p = 0; p < g.rowCount && !needsPad; ++p )
+		{
+			bool feeds = false;
+			for( unsigned int s = 0; s < g.successors[p].size(); ++s )
+			{
+				if( g.successors[p][s] == i )
+					feeds = true;
+			}
+			if( !feeds )
+				continue;
+			// p executes in the row immediately before the branch. Does it write
+			// one of the branch's condition registers?
+			for( std::list<std::string>::const_iterator r = reads.begin();
+			     r != reads.end() && !needsPad; ++r )
+			{
+				if( rowWritesIntegerRegister( g.rowTokens[p], arith, 10, *r ) )
+					needsPad = true;
+			}
+		}
+		if( !needsPad )
+			continue;
+
+		// One row, below the label, so both the fall-through and every taken edge
+		// pass through it.
+		m_codeLines.insert( g.rowIt[i], formatRawPairedInstructionLine( vuInstr(VU_OP_NOP), vuInstr(VU_OP_NOP) ) );
 		return true;
 	}
 	return false;

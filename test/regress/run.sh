@@ -129,7 +129,14 @@ PATH_OUT="$(python3 "$HERE/lib/pb-dag.py"       "$ISA" "$OUT/src" "$OUT/vsm" 2>&
 # reader is a branch condition was never compared at all - which is why four
 # rounds of value oracles walked past the delay-slot bug.
 COND_OUT="$(python3 "$HERE/lib/pd-cond.py"       "$ISA" "$OUT/src" "$OUT/vsm" 2>&1 || true)"
-[ "$VERBOSE" = "--verbose" ] && { echo "--- p8-flagorder"; echo "$ORDER_OUT"; echo "--- pa-dag"; echo "$VALUE_OUT"; echo "--- pb-dag"; echo "$PATH_OUT"; echo "--- pd-cond"; echo "$COND_OUT"; }
+# BRGAP is not a value question at all. The four kinds above compare WHAT a
+# program computes; this one compares WHEN a value is readable, which is the only
+# way to see a register written one row before the branch that tests it. Both
+# value oracles reported 0 divergent over the engine's whole shipping corpus on a
+# build carrying exactly that defect, so this is a fourth question and not a
+# fourth case.
+BRGAP_OUT="$(python3 "$HERE/lib/pz-brgap.py"     "$ISA" "$OUT/src" "$OUT/vsm" 2>&1 || true)"
+[ "$VERBOSE" = "--verbose" ] && { echo "--- p8-flagorder"; echo "$ORDER_OUT"; echo "--- pa-dag"; echo "$VALUE_OUT"; echo "--- pb-dag"; echo "$PATH_OUT"; echo "--- pd-cond"; echo "$COND_OUT"; echo "--- pz-brgap"; echo "$BRGAP_OUT"; }
 
 flagged() {  # flagged <tool-output> <case-name> -> 0 if the tool named this case
     echo "$1" | grep -qE "(^|[^A-Za-z0-9_])$2([^A-Za-z0-9_]|$)"
@@ -184,6 +191,7 @@ for name in "${order[@]}"; do
     VALUE) flagged "$VALUE_OUT" "$name" && { ok=0; detail="stored value diverges from the source"; } ;;
     PATH)  flagged "$PATH_OUT"  "$name" && { ok=0; detail="stored value diverges along some path"; } ;;
     COND)  flagged "$COND_OUT"  "$name" && { ok=0; detail="a branch condition differs from the source"; } ;;
+    BRGAP) flagged "$BRGAP_OUT" "$name" && { ok=0; detail="a branch tests a register produced too close to it along some path"; } ;;
     *)     ok=0; detail="unknown kind $kind" ;;
     esac
     if [ "$ok" = 1 ]; then

@@ -17,6 +17,11 @@
 #             MOST that many. The only kind here that can fail on an emitter
 #             which got MORE conservative; every value oracle is satisfied by
 #             one that waits for everything.
+# kind BRGAP: pz-brgap asserts that no conditional branch executes within one row
+#             of an integer producer of its condition ALONG ANY PATH. Not a value
+#             question: the defect it exists for changes when a register is
+#             readable and not what anything computes, and both value oracles
+#             passed the engine's whole corpus on a build that had it.
 # kind TIME:  arg is a bound in SECONDS - the compile must FINISH inside it.
 #             The only kind about the compiler rather than its output. A build
 #             that loops forever on one control-flow shape hangs a project
@@ -81,3 +86,5 @@ q_backedge_stale	PATH	-	Q producer BELOW its consumer, across a back edge	the co
 init_after_code	VALUE	-	.init_vf after the code (compat)	both assemblers accept a .init_vf/.init_vi placed AFTER the code it initialises, and openvcl was reported as rejecting it - that report was a malformed test program (an xyz write read back as xyzw), not a defect. This case is here so the claim cannot be re-derived: it must keep compiling AND storing the value the source computes
 qstage_bail	PATH	no:--loop-liveness-always	multi-Q staging guard is dead weight	extendMultiQStageRange counts every float alias OVERLAPPING the loop against the allocatable pool while extending only the Q-stage aliases - the same over-counted guard that cost extendLoopDirectiveRange a carried range. It cannot cost one here, and the reason is structural rather than lucky: extendLoopDirectiveLiveRanges runs the line BEFORE and extends every read-first alias unconditionally, so a name live across the back edge already has its range when this guard bails. Judged with the flag REMOVED, which is the only configuration where the guard fires at all
 qstage_bail_ok	PATH	no:--loop-liveness-always	multi-Q staging guard is dead weight (control)	the same two Q stages with two temporaries instead of twelve, so the count stays under the pool and the guard never fires - if this ever diverges the multi-Q extension itself is wrong, not its guard
+branch_backedge_cond	BRGAP	-	branch condition across a back edge	--branch-bubble-on-dependency asks whether the row above the branch produces its condition in FILE order; a branch that is a loop head also has the back edge's DELAY SLOT as a predecessor, and --emit-delay-fillers puts the mask shift there, so #218's clip programs tested the previous frustum plane's bit every iteration after the first
+branch_backedge_cond_ok	MAXCOUNT	nop:25	no blind loop-head padding	the control for the case above: same delay-slot integer op and same loop-head branch, testing a register the loop never writes, so nothing is owed - an emitter that pads every loop head passes the reproducer and fails here

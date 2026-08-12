@@ -86,6 +86,8 @@ private:
 	unsigned int emittedRowsSinceClipWrite() const;
 	void padClipFlagWindowAcrossPaths();
 	bool insertOneCrossPathClipPad( unsigned int latency );
+	void padBranchConditionAcrossPaths();
+	bool insertOneCrossPathBranchBubble();
 	bool slotCanBecomeBranchDelayFiller( const VuScheduledIssueSlot& slot,
 	                                     const Token& branch ) const;
 	bool scheduledSlotsFeedBranch( const std::vector<const VuScheduledIssueSlot*>& slots,
