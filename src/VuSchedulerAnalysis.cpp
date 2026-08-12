@@ -1457,6 +1457,14 @@ const unsigned int VU_PAIR_CYCLES_PER_WORD = 4;
 		noLongLatency.longLatencyProducerBonus = 0;
 		strategies.push_back( noLongLatency );
 
+		// The other direction was swept too, and is NOT here: the bonus at 1500, alone
+		// and with priorityWeight 30, never wins. Both were added to this list, built,
+		// and measured - the 70 real microprograms came out BYTE-IDENTICAL
+		// (e78d466912af036dfea8d0a9f3b8385c) and the five programs where openvcl still
+		// pays a `waitq` did not move a word. A best-of option that never wins is pure
+		// compile time, so they were removed and the result recorded here instead. What
+		// remains of that gap is a latency question, not a scheduling one.
+
 		// Spend the row's free slot on the LEAST valuable legal partner and leave the
 		// valuable one to be a primary. Worth three words on stapip_cull_tce and one
 		// each on cull_c and cull_tc - the programs where the ready set is a long run
